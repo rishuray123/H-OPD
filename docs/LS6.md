@@ -50,3 +50,4 @@ bash $HOPD_HOME/setup/bootstrap_verl.sh   # fetch+checkout origin/hopd
 - 2026-09-09: Experiment branch `hopd` created on rishuray123/verl from `ls6` (`044bbba2`). Harness bootstraps `origin/hopd`. Install/smoke not run yet.
 - 2026-09-09: Existing clones: `git pull --ff-only` on H-OPD, then `bootstrap_verl.sh` for nested `verl/` (`origin/hopd`).
 - 2026-09-09: `gpu-a100-dev` often queues; use `idev -p gpu-a100` (full 3× A100). Not `gpu-a100-small`.
+- 2026-09-09: Harness pushed to `rishuray123/H-OPD` `main` (`d4d0d37`). Cluster clone of older `dcff686` must `git pull` before `bootstrap_verl.sh`.
