@@ -1,86 +1,44 @@
-<div align="center">
+# H-OPD (this fork)
 
-<h1> H-OPD: Confidence Aware Heterogeneous Multi-Teacher Multimodal On-policy Distillation </h1>
+Harness for reproducing [H-OPD](https://arxiv.org/abs/2607.02592) and later variants.
 
-<a href='https://arxiv.org/abs/2607.02592'><img src='https://img.shields.io/badge/Paper-arXiv-red'></a>
-<a href='https://huggingface.co/datasets/qixiangbupt/H-OPD-data'><img src='https://img.shields.io/badge/Datasets-HuggingFace-yellow'></a>
+veRL lives in **`verl/` inside this folder** (gitignored). It is still a separate GitHub repo so trainer patches stay reusable: [rishuray123/verl](https://github.com/rishuray123/verl) (**`hopd`** for this experiment, `ls6` is the frozen LS6 stack, `main` tracks upstream — do not install `main` on Lonestar).
 
-![H-OPD Framework](fig/main.jpg)
+Do not reuse `$SCRATCH/opdl/`. This project uses `$SCRATCH/hopd/`.
 
-<h5 align="center">If you find this project useful, please give us a star🌟.</h5>
+Paper authors did not release `run_hopd.sh`. Stage 1 is single-teacher VL OPD on their parquet. Entropy arbitration comes later as a `loss_mode` on our veRL fork.
 
-<p align="center">
-Qixiang Yin<sup>1,6</sup>, Huanjin Yao<sup>2</sup>, Cai Yuchen<sup>3</sup>, Jianghao Chen<sup>6</sup>, Ziyi Wang<sup>1</sup>, Min Yang<sup>2,*</sup>, Fei Su<sup>1,4,5</sup>, Zhicheng Zhao<sup>1,4,5,*</sup>
-</p>
+## Lonestar6 (one GPU node)
 
-<p align="center">
-<sup>1</sup> Beijing University of Posts and Telecommunications, <sup>2</sup> ByteDance, <sup>3</sup> USTC
-</p>
+```bash
+ssh ls6
+idev -p gpu-a100-dev -A ECS26006 -N 1 -n 1 -t 04:00:00
 
-<p align="center">
-<sup>4</sup> Beijing Key Laboratory of Network System and Network Culture
-</p>
+export HOPD_HOME=$SCRATCH/hopd/H-OPD
+export HOPD_VENV=$SCRATCH/hopd/.venv
+export HOPD_ENV_SCRIPT=$HOPD_HOME/setup/env_vars.ls6.sh
+export HOPD_SCRATCH=$SCRATCH/hopd
+export PATH="$HOME/.local/bin:$PATH"
 
-<p align="center">
-<sup>5</sup> Key Laboratory of Interactive Technology and Experience System, Ministry of Culture and Tourism
-</p>
+mkdir -p $SCRATCH/hopd && cd $SCRATCH/hopd
+if [[ ! -d $HOPD_HOME/.git ]]; then
+    git clone https://github.com/rishuray123/H-OPD.git
+else
+    git -C $HOPD_HOME pull --ff-only origin main
+fi
 
-<p align="center">
-<sup>6</sup> Zhongguancun Academy, Beijing, China
-</p>
+bash $HOPD_HOME/setup/install_ls6.sh   # clones or git fetch+checkout origin/hopd
+source $HOPD_VENV/bin/activate
+python $HOPD_HOME/download_data.py --out_dir $HOPD_SCRATCH/data
+bash $HOPD_HOME/verify_setup.sh
+bash $HOPD_HOME/hopd_vl_opd_ls6.sh --steps 5
+```
 
-<p align="center">
-<sup>*</sup> Corresponding Author
-</p>
-</div>
+Already cloned: `git -C $HOPD_HOME pull --ff-only origin main` then `bash $HOPD_HOME/setup/bootstrap_verl.sh` (fast trainer-only update) or `install_ls6.sh` (also refreshes the venv).
 
-## 📊 Datasets
+Student 2 GPUs FSDP, teacher 1 GPU vLLM. Defaults: Qwen3-VL-2B ← Qwen3-VL-4B, `k=8`, reverse KL.
 
-All datasets are available on HuggingFace:
+## Citation
 
-<a href='https://huggingface.co/datasets/qixiangbupt/H-OPD-data'><img src='https://img.shields.io/badge/Datasets-HuggingFace-yellow'></a>
-
-### Training Data
-
-We train our models on **MMFineReason-123K**. Under the same experimental setting:
-- We use a multimodal teacher model to generate image descriptions
-- We employ GPT-4.1-mini to assess the correctness of these descriptions
-- After filtering, we obtain **55K** high-quality training samples, which are used consistently across all training settings
-
-**Filename:** `mmfine_reason_sampled_55k_text_prompt.parquet`
-
-### Validation Data
-
-We sample validation sets from three math reasoning benchmarks:
-
-| Benchmark | Filename |
-|-----------|----------|
-| MathVerse | `mathverse_200_test.parquet` |
-| MathVision | `mathvision_test.parquet` |
-| MathVista | `mathvista_200_test.parquet` |
-
-
-
-
-
-## 🎙️ News
-- **`Jun 2, 2026.`** We release our paper in arxiv.
-- **`Jun 2, 2026.`** We release our training dataset in github.
-
-
-## 💡 About H-OPD
-On-policy distillation (OPD) has recently emerged as an effective post-training paradigm by providing supervision on student-generated trajectories. 
-However, existing OPD methods for multimodal reasoning usually rely on a static teacher routing, assigning each sample to a single teacher based on modality or task type. This ignores that visual grounding and abstract reasoning may dominate different decoding steps, making a single teacher insufficient for the full trajectory.
-To this end, H-OPD is proposed as a confidence-aware heterogeneous multi-teacher OPD framework for multimodal reasoning. By verifying the complementarity of heterogeneous teachers in the same reasoning process, H-OPD replaces task or sample level teacher routing with token-level teacher arbitration along the shared student trajectory. H-OPD employs vision-to-language description transfer to enable text-only teachers to access key visual semantics, and uses a confidence-aware arbitration mechanism to dynamically combine vision-language teacher and text-only teachers at each token. 
-Extensive evaluations over 11 widely-used reasoning benchmarks showcase the superior performance of our method.
-
-
-
-## 🔗 Citation
-If you find this repository is useful, please star🌟 this repo and cite🖇️ our paper.
-
-
-## 🙏 Acknowledgment
-Our work is primarily based on the following codebases. We are sincerely grateful for their work.
-- [VLMEvalKit](https://github.com/open-compass/VLMEvalKit): We use VLMEvalKit for evaluation.
-- [VerL](https://github.com/verl-project/verl/tree/main): We use VerL for our codebase.
+Yin et al., *H-OPD: Confidence Aware Heterogeneous Multi-Teacher Multimodal On-policy Distillation*, arXiv:2607.02592.
+Data: [qixiangbupt/H-OPD-data](https://huggingface.co/datasets/qixiangbupt/H-OPD-data).

@@ -1,0 +1,14 @@
+---
+description: Lonestar6 ops — read and update the living knowledge base
+alwaysApply: true
+---
+
+# Lonestar6 knowledge base
+
+This project runs H-OPD on **TACC Lonestar6**. Before SSH, `idev`, path, or install advice, read `docs/LS6.md`.
+
+When a job reveals a durable fact, append it to `docs/LS6.md` in the same turn.
+
+Trainer is a nested clone at `verl/` (gitignored), GitHub [rishuray123/verl](https://github.com/rishuray123/verl), branch **`hopd`** to run (from frozen `ls6`). Do not use `$SCRATCH/opdl/` from the MATH OPDL project.
+
+Venvs, HF cache, parquet, and checkpoints belong on `$SCRATCH`, never `$WORK`.

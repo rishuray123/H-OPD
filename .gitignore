@@ -1,5 +1,13 @@
-scripts/
-run_hopd.sh
+logs/
+outputs/
+wandb/
+eval_outputs/
+scratch/
+__pycache__/
+*.pyc
+.venv/
 verl/
-requirements.txt
-setup.py
+*.safetensors
+*.parquet
+*.pt
+.DS_Store
