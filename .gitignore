@@ -11,3 +11,4 @@ verl/
 *.parquet
 *.pt
 .DS_Store
+experiments/token_prob_dump/runs/

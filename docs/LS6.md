@@ -51,3 +51,5 @@ bash $HOPD_HOME/setup/bootstrap_verl.sh   # fetch+checkout origin/hopd
 - 2026-09-09: Existing clones: `git pull --ff-only` on H-OPD, then `bootstrap_verl.sh` for nested `verl/` (`origin/hopd`).
 - 2026-09-09: `gpu-a100-dev` often queues; use `idev -p gpu-a100` (full 3× A100). Not `gpu-a100-small`.
 - 2026-09-09: Harness pushed to `rishuray123/H-OPD` `main` (`d4d0d37`). Cluster clone of older `dcff686` must `git pull` before `bootstrap_verl.sh`.
+- 2026-09-09: Login-node bootstrap succeeded: `$SCRATCH/hopd/H-OPD` at `a320708`, nested `verl/` on `hopd` (`044bbba2`). `install_ls6.sh` still needs a GPU node.
+- 2026-09-15: Offline token-prob dump lives in `experiments/token_prob_dump/` (not the trainer). `sbatch experiments/token_prob_dump/run_ls6.sh` on `gpu-a100`. Writes `$SCRATCH/hopd/data/token_prob_dump/`.
