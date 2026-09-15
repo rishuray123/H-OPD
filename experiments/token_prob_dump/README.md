@@ -34,3 +34,7 @@ First GPU job is small (8 prompts × 4 samples). After it works:
 ```bash
 sbatch --export=ALL,N_PROMPTS=64,N_SAMPLES=8,MAX_NEW=128 experiments/token_prob_dump/run_ls6.sh
 ```
+
+## Colab
+
+See [COLAB.md](COLAB.md). Synthetic dump works on CPU. T4 can smoke the HF path with 2B as both student and teacher, not the LS6 4B teacher.

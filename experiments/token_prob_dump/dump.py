@@ -222,7 +222,13 @@ def dump_hf(args: argparse.Namespace) -> Path:
     if df.empty:
         raise SystemExit(f"parquet has 0 rows: {parquet}")
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    dtype = torch.bfloat16 if device == "cuda" else torch.float32
+    if device == "cuda":
+        # T4/Colab (sm75): float16. A100/LS6 (sm80+): bfloat16.
+        major = torch.cuda.get_device_capability()[0]
+        dtype = torch.bfloat16 if major >= 8 else torch.float16
+    else:
+        dtype = torch.float32
+    print(f"device={device} dtype={dtype}", flush=True)
 
     n = len(df) * args.n_samples
     lmax = args.max_new_tokens
