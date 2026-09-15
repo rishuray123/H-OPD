@@ -53,3 +53,4 @@ bash $HOPD_HOME/setup/bootstrap_verl.sh   # fetch+checkout origin/hopd
 - 2026-09-09: Harness pushed to `rishuray123/H-OPD` `main` (`d4d0d37`). Cluster clone of older `dcff686` must `git pull` before `bootstrap_verl.sh`.
 - 2026-09-09: Login-node bootstrap succeeded: `$SCRATCH/hopd/H-OPD` at `a320708`, nested `verl/` on `hopd` (`044bbba2`). `install_ls6.sh` still needs a GPU node.
 - 2026-09-15: Offline token-prob dump lives in `experiments/token_prob_dump/` (not the trainer). `sbatch experiments/token_prob_dump/run_ls6.sh` on `gpu-a100`. Writes `$SCRATCH/hopd/data/token_prob_dump/`.
+- 2026-09-15: Login preflight at `a04ceff` OK; no mmfine parquet yet. Dump sbatch now installs venv and downloads data if missing.

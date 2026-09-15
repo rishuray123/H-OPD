@@ -4,7 +4,7 @@
 #SBATCH --error=logs/%x_%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --time=8:00:00
+#SBATCH --time=12:00:00
 #SBATCH --partition=gpu-a100
 #SBATCH -A ECS26006
 
@@ -26,18 +26,27 @@ if [[ ! -f "$HOPD_HOME/config.sh" ]]; then
     echo "ERROR: $HOPD_HOME is not the H-OPD repo. git clone/pull first." >&2
     exit 1
 fi
-if [[ ! -x "$HOPD_VENV/bin/python" ]]; then
-    echo "ERROR: no venv at $HOPD_VENV. Run setup/install_ls6.sh on a GPU node first." >&2
-    exit 1
-fi
 
 # shellcheck disable=SC1091
 source "$HOPD_HOME/config.sh"
 cd "$HOPD_HOME"
 mkdir -p "$HOPD_HOME/logs" "$HOPD_DATA_ROOT/token_prob_dump"
 
-REQUIRE_CUDA=1 REQUIRE_PARQUET=1 bash "$HOPD_HOME/experiments/token_prob_dump/preflight.sh"
+if [[ ! -x "$HOPD_VENV/bin/python" ]]; then
+    echo "No venv at $HOPD_VENV — running setup/install_ls6.sh"
+    bash "$HOPD_HOME/setup/install_ls6.sh"
+fi
+# shellcheck disable=SC1090
+source "$HOPD_VENV/bin/activate"
 hopd_activate_env || exit 1
+
+n=$(find "$HOPD_DATA_ROOT" -name 'mmfine_reason_sampled_55k_text_prompt.parquet' 2>/dev/null | wc -l | tr -d ' ')
+if [[ "$n" -eq 0 ]]; then
+    echo "No train parquet — download_data.py --out_dir $HOPD_DATA_ROOT"
+    python "$HOPD_HOME/download_data.py" --out_dir "$HOPD_DATA_ROOT"
+fi
+
+REQUIRE_CUDA=1 REQUIRE_PARQUET=1 bash "$HOPD_HOME/experiments/token_prob_dump/preflight.sh"
 
 python -c "import matplotlib" 2>/dev/null || uv pip install matplotlib
 

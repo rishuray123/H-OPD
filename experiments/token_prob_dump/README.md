@@ -19,13 +19,12 @@ git -C $HOPD_HOME pull --ff-only origin main
 bash $HOPD_HOME/experiments/token_prob_dump/preflight.sh
 ```
 
-If preflight says missing dump.py, pull failed. If no parquet, run `download_data.py` on a GPU node after `install_ls6.sh`.
-
-Submit (creates `logs/` in the repo so `#SBATCH --output=logs/...` works):
+If preflight warns **no mmfine parquet**, do not expect the dump to work until a GPU job downloads data. `run_ls6.sh` now runs `install_ls6.sh` and `download_data.py` when those are missing (first job is long).
 
 ```bash
 cd $HOPD_HOME
 mkdir -p logs
+git pull --ff-only origin main
 sbatch experiments/token_prob_dump/run_ls6.sh
 squeue -u $USER
 ```
