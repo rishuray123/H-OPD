@@ -82,8 +82,9 @@ def dump_synthetic(args: argparse.Namespace) -> Path:
             "topk_lp": topk_lp,
         }
 
-    student = pack_model(0.0)
+        student = pack_model(0.0)
     teacher = pack_model(0.35)
+    teacher_text = pack_model(0.15)
 
     out = Path(args.out_dir)
     meta = {
@@ -95,7 +96,7 @@ def dump_synthetic(args: argparse.Namespace) -> Path:
         "max_new_tokens": lmax,
         "topk": topk,
         "student_model": "synthetic-student",
-        "teachers": ["synthetic-teacher-vl"],
+        "teachers": ["synthetic-teacher-vl", "synthetic-teacher-text"],
         "note": "Placeholder tensors to exercise dump/plot. Not Qwen3-VL.",
     }
     return write_dump(
@@ -105,7 +106,7 @@ def dump_synthetic(args: argparse.Namespace) -> Path:
         sample_i=sample_i,
         length=length,
         response_ids=response_ids,
-        models={"student": student, "teacher_vl": teacher},
+        models={"student": student, "teacher_vl": teacher, "teacher_text": teacher_text},
     )
 
 
@@ -210,6 +211,32 @@ def _load_vl(model_id: str, dtype, device):
     return model.to(device).eval()
 
 
+def _plain_text(prompt) -> str:
+    if isinstance(prompt, list) and prompt and isinstance(prompt[0], dict):
+        c = prompt[0].get("content", "")
+        if isinstance(c, str):
+            return c
+        if isinstance(c, list):
+            parts = []
+            for blk in c:
+                if isinstance(blk, dict) and blk.get("type") == "text":
+                    parts.append(str(blk.get("text", "")))
+                elif isinstance(blk, str):
+                    parts.append(blk)
+            return "\n".join(parts)
+        return json.dumps(c, default=str)
+    if isinstance(prompt, str):
+        return prompt
+    return json.dumps(prompt, default=str)
+
+
+def _load_lm(model_id: str, dtype, device):
+    from transformers import AutoModelForCausalLM
+
+    model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=dtype, trust_remote_code=True)
+    return model.to(device).eval()
+
+
 def dump_hf(args: argparse.Namespace) -> Path:
     import pandas as pd
     import torch
@@ -247,7 +274,8 @@ def dump_hf(args: argparse.Namespace) -> Path:
         }
 
     student_pack = empty_pack()
-    teacher_pack = empty_pack()
+    teacher_vl_pack = empty_pack()
+    teacher_text_pack = empty_pack()
 
     if device != "cuda":
         print("WARN: no CUDA; HF dump will be extremely slow on CPU", flush=True)
@@ -288,7 +316,7 @@ def dump_hf(args: argparse.Namespace) -> Path:
             student_pack["token_lp"][pair, :L] = tlp[:L]
             student_pack["topk_ids"][pair, :L] = tids[:L]
             student_pack["topk_lp"][pair, :L] = tlpk[:L]
-            cached_inputs.append((pair, inputs, prompt_len, resp[:L].cpu()))
+            cached_inputs.append((pair, inputs, prompt_len, resp[:L].cpu(), prompt))
             pair += 1
             print(f"student generate prompt={pi} sample={si} L={L}", flush=True)
 
@@ -296,17 +324,38 @@ def dump_hf(args: argparse.Namespace) -> Path:
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    teacher = _load_vl(args.teacher, dtype, device)
+    teacher_vl = _load_vl(args.teacher, dtype, device)
 
-    for pair_i, inputs, prompt_len, resp in cached_inputs:
+    for pair_i, inputs, prompt_len, resp, _prompt in cached_inputs:
         L = int(resp.shape[0])
-        tlp, tids, tlpk = _teacher_force_topk(teacher, inputs, prompt_len, resp, topk, device)
-        teacher_pack["token_lp"][pair_i, :L] = tlp[:L]
-        teacher_pack["topk_ids"][pair_i, :L] = tids[:L]
-        teacher_pack["topk_lp"][pair_i, :L] = tlpk[:L]
-        print(f"teacher force pair={pair_i} L={L}", flush=True)
+        tlp, tids, tlpk = _teacher_force_topk(teacher_vl, inputs, prompt_len, resp, topk, device)
+        teacher_vl_pack["token_lp"][pair_i, :L] = tlp[:L]
+        teacher_vl_pack["topk_ids"][pair_i, :L] = tids[:L]
+        teacher_vl_pack["topk_lp"][pair_i, :L] = tlpk[:L]
+        print(f"teacher_vl force pair={pair_i} L={L}", flush=True)
 
-    del teacher
+    del teacher_vl
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    from transformers import AutoTokenizer
+
+    text_tok = AutoTokenizer.from_pretrained(args.teacher_text, trust_remote_code=True)
+    teacher_text = _load_lm(args.teacher_text, dtype, device)
+    for pair_i, _inputs, _plen, resp, prompt in cached_inputs:
+        L = int(resp.shape[0])
+        user = _plain_text(prompt)
+        messages = [{"role": "user", "content": user}]
+        text = text_tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        tin = text_tok(text, return_tensors="pt")
+        text_len = int(tin["input_ids"].shape[1])
+        tlp, tids, tlpk = _teacher_force_topk(teacher_text, tin, text_len, resp, topk, device)
+        teacher_text_pack["token_lp"][pair_i, :L] = tlp[:L]
+        teacher_text_pack["topk_ids"][pair_i, :L] = tids[:L]
+        teacher_text_pack["topk_lp"][pair_i, :L] = tlpk[:L]
+        print(f"teacher_text force pair={pair_i} L={L}", flush=True)
+
+    del teacher_text
     out = Path(args.out_dir)
     meta = {
         "backend": "hf",
@@ -317,7 +366,7 @@ def dump_hf(args: argparse.Namespace) -> Path:
         "max_new_tokens": lmax,
         "topk": topk,
         "student_model": args.student,
-        "teachers": [args.teacher],
+        "teachers": [args.teacher, args.teacher_text],
         "train_file": str(parquet),
         "temperature": args.temperature,
         "device": device,
@@ -329,8 +378,11 @@ def dump_hf(args: argparse.Namespace) -> Path:
         sample_i=sample_i[:pair],
         length=length[:pair],
         response_ids=response_ids[:pair],
-        models={"student": {k: v[:pair] for k, v in student_pack.items()},
-                "teacher_vl": {k: v[:pair] for k, v in teacher_pack.items()}},
+        models={
+            "student": {k: v[:pair] for k, v in student_pack.items()},
+            "teacher_vl": {k: v[:pair] for k, v in teacher_vl_pack.items()},
+            "teacher_text": {k: v[:pair] for k, v in teacher_text_pack.items()},
+        },
     )
 
 
@@ -347,6 +399,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--student", default="Qwen/Qwen3-VL-2B-Instruct")
     p.add_argument("--teacher", default="Qwen/Qwen3-VL-4B-Instruct")
+    p.add_argument("--teacher_text", default="Qwen/Qwen3-4B-Instruct-2507")
     return p.parse_args()
 
 
