@@ -234,7 +234,10 @@ def _load_lm(model_id: str, dtype, device):
     from transformers import AutoModelForCausalLM
 
     model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=dtype, trust_remote_code=True)
-    return model.to(device).eval()
+    print(f"loaded {model_id} on CPU, moving to {device}…", flush=True)
+    model = model.to(device).eval()
+    print(f"{model_id} on {device}", flush=True)
+    return model
 
 
 def dump_hf(args: argparse.Namespace) -> Path:
@@ -354,11 +357,20 @@ def dump_hf(args: argparse.Namespace) -> Path:
         text = text_tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         tin = text_tok(text, return_tensors="pt")
         text_len = int(tin["input_ids"].shape[1])
-        tlp, tids, tlpk = _teacher_force_topk(teacher_text, tin, text_len, resp, topk, device)
-        teacher_text_pack["token_lp"][pair_i, :L] = tlp[:L]
-        teacher_text_pack["topk_ids"][pair_i, :L] = tids[:L]
-        teacher_text_pack["topk_lp"][pair_i, :L] = tlpk[:L]
-        print(f"teacher_text force pair={pair_i} L={L}", flush=True)
+        # Re-encode Y with the text tokenizer (do not reuse VL token ids).
+        resp_text = processor.tokenizer.decode(resp.tolist(), skip_special_tokens=False)
+        resp_ids = text_tok.encode(resp_text, add_special_tokens=False)
+        if not resp_ids:
+            print(f"teacher_text skip pair={pair_i} empty re-encode", flush=True)
+            continue
+        resp_t = torch.tensor(resp_ids[:lmax], dtype=torch.long)
+        Lt = int(resp_t.shape[0])
+        tlp, tids, tlpk = _teacher_force_topk(teacher_text, tin, text_len, resp_t, topk, device)
+        nfill = min(L, Lt, tlp.shape[0])
+        teacher_text_pack["token_lp"][pair_i, :nfill] = tlp[:nfill]
+        teacher_text_pack["topk_ids"][pair_i, :nfill] = tids[:nfill]
+        teacher_text_pack["topk_lp"][pair_i, :nfill] = tlpk[:nfill]
+        print(f"teacher_text force pair={pair_i} L={nfill}", flush=True)
 
     del teacher_text
     out = Path(args.out_dir)
