@@ -324,7 +324,9 @@ def dump_hf(args: argparse.Namespace) -> Path:
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
+    print("loading VL teacher…", flush=True)
     teacher_vl = _load_vl(args.teacher, dtype, device)
+    print(f"VL teacher on device, {len(cached_inputs)} pairs to score", flush=True)
 
     for pair_i, inputs, prompt_len, resp, _prompt in cached_inputs:
         L = int(resp.shape[0])
@@ -340,10 +342,13 @@ def dump_hf(args: argparse.Namespace) -> Path:
 
     from transformers import AutoTokenizer
 
+    print("loading text teacher (CPU then GPU)…", flush=True)
     text_tok = AutoTokenizer.from_pretrained(args.teacher_text, trust_remote_code=True)
     teacher_text = _load_lm(args.teacher_text, dtype, device)
-    for pair_i, _inputs, _plen, resp, prompt in cached_inputs:
+    print(f"text teacher on device, {len(cached_inputs)} pairs to score", flush=True)
+    for n_done, (pair_i, _inputs, _plen, resp, prompt) in enumerate(cached_inputs):
         L = int(resp.shape[0])
+        print(f"teacher_text start pair={pair_i} ({n_done+1}/{len(cached_inputs)}) L={L}", flush=True)
         user = _plain_text(prompt)
         messages = [{"role": "user", "content": user}]
         text = text_tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
