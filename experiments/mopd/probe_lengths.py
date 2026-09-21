@@ -38,6 +38,7 @@ def main() -> None:
         {
             "prompt_key": "prompt",
             "image_key": "images",
+            "image_patch_size": 16,
             "max_prompt_length": args.max_prompt,
             "truncation": "right",
             "filter_overlong_prompts": False,

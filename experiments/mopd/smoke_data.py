@@ -62,6 +62,13 @@ def test_tiny() -> None:
         assert vl_img["max_pixels"] == 256 * 32 * 32
         text_img = got["images"].iloc[1]
         assert text_img is None or len(text_img) == 0
+        import pyarrow.parquet as pq
+
+        img_type = str(pq.read_schema(dst).field("images").type)
+        assert "bytes" in img_type and "max_pixels" in img_type
+        # struct field named `image` (not max_pixels) must be gone
+        names = pq.read_schema(dst).field("images").type.value_type.names
+        assert "image" not in names, names
         print(r.stdout.strip())
     print("[ ok ] mopd parquet routing (VL keeps a capped image, text drops it)")
 

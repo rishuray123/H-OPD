@@ -27,6 +27,17 @@ exception for rows veRL would silently skip. If `hopd_vl` shows `over budget:
 0/8`, the VL rows will survive; the run's own `filter dataset len:` should then
 be close to `dataset len:`.
 
+`make_routed_parquet.py` must write a **new** Arrow schema (`bytes` + pixel
+caps only). HuggingFace `datasets` reloads every struct field, so a pandas
+round-trip that still carries a null `image` fails `process_image` even when
+`pd.read_parquet` hides that key. After pulling this repo, also refresh the
+nested trainer so `process_image` drops null fields (needed for val parquets):
+
+```bash
+bash setup/bootstrap_verl.sh
+rm -f scratch/data/mopd/train_routed_96.parquet scratch/data/mopd/train_routed.parquet
+```
+
 ## Before any run
 
 ```bash

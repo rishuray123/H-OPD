@@ -6,6 +6,28 @@ import argparse
 from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+# HuggingFace `datasets` materializes every Arrow struct field, including
+# nulls. If this schema kept the source `image` field, process_image would
+# still see both `bytes` and `image` even after we dropped nulls in pandas.
+_IMAGE_STRUCT = pa.struct(
+    [
+        pa.field("bytes", pa.binary()),
+        pa.field("max_pixels", pa.int64()),
+        pa.field("min_pixels", pa.int64()),
+    ]
+)
+_IMAGES_TYPE = pa.list_(_IMAGE_STRUCT)
+
+
+def _as_bytes(raw) -> bytes:
+    if isinstance(raw, (bytes, bytearray, memoryview)):
+        return bytes(raw)
+    if hasattr(raw, "tobytes"):
+        return raw.tobytes()
+    return bytes(raw)
 
 
 def _clean_image(img, max_pixels: int, min_pixels: int):
@@ -24,18 +46,38 @@ def _clean_image(img, max_pixels: int, min_pixels: int):
     out = {k: v for k, v in img.items() if v is not None}
     if "bytes" in out and "image" in out:
         out.pop("image")
-    out.setdefault("max_pixels", max_pixels)
-    out.setdefault("min_pixels", min_pixels)
-    return out
+    if "bytes" not in out:
+        return None
+    return {
+        "bytes": _as_bytes(out["bytes"]),
+        "max_pixels": int(out.get("max_pixels", max_pixels)),
+        "min_pixels": int(out.get("min_pixels", min_pixels)),
+    }
 
 
 def _clean_images(images, max_pixels: int, min_pixels: int):
     if images is None:
         return None
     try:
-        return [_clean_image(i, max_pixels, min_pixels) for i in images]
+        return [c for c in (_clean_image(i, max_pixels, min_pixels) for i in images) if c is not None]
     except TypeError:
         return images
+
+
+def _write_parquet(df: pd.DataFrame, out: Path) -> None:
+    """Write with an images schema that cannot resurrect a null `image` field."""
+    if "images" in df.columns:
+        other = df.drop(columns=["images"])
+        table = pa.Table.from_pandas(other, preserve_index=False)
+        table = table.append_column(
+            "images",
+            pa.array([None if im is None else im for im in df["images"]], type=_IMAGES_TYPE),
+        )
+    else:
+        table = pa.Table.from_pandas(df, preserve_index=False)
+    pq.write_table(table, out)
+    if "images" in table.column_names:
+        print(f"arrow images: {table.schema.field('images').type}")
 
 
 def main() -> None:
@@ -67,15 +109,16 @@ def main() -> None:
         first = next((im for im in df["images"] if im is not None and len(im) > 0), None)
         if isinstance(first, (list, tuple)) and isinstance(first[0], dict):
             print(f"image struct fields in: {sorted(first[0])}")
-        df["images"] = [
+        cleaned = [
             None if ds == "hopd_text" else _clean_images(im, args.image_max_pixels, args.image_min_pixels)
             for ds, im in zip(df["data_source"], df["images"])
         ]
-        first = next((im for im in df["images"] if im is not None and len(im) > 0), None)
+        df["images"] = cleaned
+        first = next((im for im in cleaned if im is not None and len(im) > 0), None)
         if isinstance(first, (list, tuple)) and isinstance(first[0], dict):
             print(f"image struct fields out: {sorted(first[0])} max_pixels={args.image_max_pixels}")
     out.parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(out, index=False)
+    _write_parquet(df, out)
     n_vl = (df["data_source"] == "hopd_vl").sum()
     n_text = (df["data_source"] == "hopd_text").sum()
     print(f"Wrote {out} n={n} vl={n_vl} text={n_text}")
