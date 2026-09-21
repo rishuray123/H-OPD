@@ -75,7 +75,7 @@ def _write_parquet(df: pd.DataFrame, out: Path) -> None:
         )
     else:
         table = pa.Table.from_pandas(df, preserve_index=False)
-    pq.write_table(table, out)
+    pq.write_table(table, out, row_group_size=min(1024, max(len(df), 1)))
     if "images" in table.column_names:
         print(f"arrow images: {table.schema.field('images').type}")
 
