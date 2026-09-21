@@ -104,15 +104,24 @@ except Exception as e:  # noqa: BLE001
     line("vllm gpu worker imports", f"FAILED {type(e).__name__}: {e}")
     BAD.append("vLLM worker import fails -> every engine core will fail to start")
 
-# verl's left_right_2_no_padding uses this on CUDA no matter how the actor is
-# configured, so a missing flash_attn kills the first compute_log_prob call.
+# left_right_2_no_padding needs these on the first compute_log_prob call. On the
+# hopd branch they come from transformers when flash_attn is absent, which is the
+# supported setup: a standalone flash_attn breaks vllm_flash_attn's cute import.
 try:
-    from flash_attn.bert_padding import unpad_input  # noqa: F401
+    from verl.utils.attention_utils import _get_attention_functions
 
-    line("flash_attn.bert_padding", "ok")
+    _get_attention_functions()
+    line("verl padding helpers", "ok")
 except Exception as e:  # noqa: BLE001
-    line("flash_attn.bert_padding", f"FAILED {type(e).__name__}: {e}")
-    BAD.append("flash_attn missing -> compute_log_prob fails at step 1")
+    line("verl padding helpers", f"FAILED {type(e).__name__}: {e}")
+    BAD.append("verl padding helpers fail -> compute_log_prob dies at step 1")
+
+try:
+    import flash_attn  # noqa: F401
+
+    line("flash_attn present", "yes — remove it if vllm_flash_attn/cute errors")
+except ImportError:
+    line("flash_attn present", "no (expected)")
 
 print("\n== trainer entrypoint ==")
 try:
