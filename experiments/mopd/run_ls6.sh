@@ -16,9 +16,35 @@
 set -euo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 
-export HOPD_HOME="${HOPD_HOME:-$SCRATCH/hopd/H-OPD}"
-export HOPD_VENV="${HOPD_VENV:-$SCRATCH/hopd/.venv}"
-export HOPD_SCRATCH="${HOPD_SCRATCH:-$SCRATCH/hopd}"
+# Lonestar sets $SCRATCH; Lightning / local does not. Do not expand $SCRATCH
+# under set -u unless it exists.
+if [[ -z "${HOPD_HOME:-}" ]]; then
+    if [[ -n "${SCRATCH:-}" ]]; then
+        export HOPD_HOME="$SCRATCH/hopd/H-OPD"
+    else
+        export HOPD_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+    fi
+fi
+if [[ -z "${HOPD_VENV:-}" ]]; then
+    if [[ -n "${SCRATCH:-}" ]]; then
+        export HOPD_VENV="$SCRATCH/hopd/.venv"
+    elif [[ -n "${VIRTUAL_ENV:-}" ]]; then
+        export HOPD_VENV="$VIRTUAL_ENV"
+    else
+        export HOPD_VENV="$HOPD_HOME/scratch/.venv"
+    fi
+fi
+if [[ -z "${HOPD_SCRATCH:-}" ]]; then
+    if [[ -n "${SCRATCH:-}" ]]; then
+        export HOPD_SCRATCH="$SCRATCH/hopd"
+    else
+        export HOPD_SCRATCH="$HOPD_HOME/scratch"
+    fi
+fi
+# Lightning has no TACC modules; leave HOPD_ENV_SCRIPT empty there.
+if [[ -z "${SCRATCH:-}" && -z "${HOPD_ENV_SCRIPT+x}" ]]; then
+    export HOPD_ENV_SCRIPT=""
+fi
 export HOPD_ENV_SCRIPT="${HOPD_ENV_SCRIPT-$HOPD_HOME/setup/env_vars.ls6.sh}"
 
 if [[ ! -f "$HOPD_HOME/config.sh" ]]; then
