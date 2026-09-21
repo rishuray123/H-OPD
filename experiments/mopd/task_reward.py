@@ -11,6 +11,7 @@ which is how we watch whether the student is actually improving.
 """
 from __future__ import annotations
 
+import os
 from typing import Any, Optional
 
 
@@ -40,8 +41,9 @@ def compute_score(
     **kwargs: Any,
 ) -> dict:
     acc = _grade(solution_str, ground_truth)
+    score = acc if os.environ.get("HOPD_TASK_REWARD", "0") == "1" else 0.0
     return {
-        "score": 0.0,
+        "score": score,
         "acc": acc,
         "is_vl": 1.0 if str(data_source) == "hopd_vl" else 0.0,
         "resp_chars": float(len(solution_str)),

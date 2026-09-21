@@ -53,13 +53,26 @@ if [[ -z "$SRC" || ! -f "$SRC" ]]; then
 fi
 
 MAX_ROWS="${MOPD_MAX_ROWS:-0}"
+MIX="${HOPD_MIX:-0}"
+ROUTED_TAG=""
 if [[ "$MAX_ROWS" -gt 0 ]]; then
-    MOPD_TRAIN="$HOPD_DATA_ROOT/mopd/train_routed_${MAX_ROWS}.parquet"
-else
+    ROUTED_TAG="_${MAX_ROWS}"
+fi
+if [[ "$MIX" == "1" ]]; then
+    ROUTED_TAG="${ROUTED_TAG}_mix"
+fi
+MOPD_TRAIN="$HOPD_DATA_ROOT/mopd/train_routed${ROUTED_TAG:-}.parquet"
+# train_routed.parquet when no slice and no mix (ROUTED_TAG empty → train_routed.parquet)
+if [[ -z "$ROUTED_TAG" ]]; then
     MOPD_TRAIN="$HOPD_DATA_ROOT/mopd/train_routed.parquet"
 fi
+KEEP_IMG_ARGS=()
+if [[ "$MIX" == "1" ]]; then
+    KEEP_IMG_ARGS=(--keep_all_images)
+fi
 python "$HOPD_HOME/experiments/mopd/make_routed_parquet.py" --src "$SRC" --out "$MOPD_TRAIN" \
-    --max_rows "$MAX_ROWS" --image_max_pixels "${MOPD_IMAGE_MAX_PIXELS:-262144}"
+    --max_rows "$MAX_ROWS" --image_max_pixels "${MOPD_IMAGE_MAX_PIXELS:-262144}" \
+    ${KEEP_IMG_ARGS[@]+"${KEEP_IMG_ARGS[@]}"}
 VAL_FILE="$MOPD_TRAIN"
 if [[ "${MOPD_FULL:-0}" == "1" ]]; then
     _val="$(find "$HOPD_DATA_ROOT" -name 'mathvista_200_test.parquet' | head -1 || true)"
@@ -115,6 +128,16 @@ TOPK=8
 STUDENT_GPUS=1
 TEACHER_GPUS=2
 GPUS_ON_NODE=3
+USE_TASK_REWARDS=False
+if [[ "${HOPD_TASK_REWARD:-0}" == "1" ]]; then
+    USE_TASK_REWARDS=True
+    export HOPD_TASK_REWARD=1
+fi
+MIX_ARGS=()
+if [[ "${HOPD_MIX:-0}" == "1" ]]; then
+    MIX_ARGS=(distillation.mix_teachers=True distillation.mix_temperature="${HOPD_MIX_TAU:-1.0}")
+    RUN_TAG="${RUN_TAG}-mix"
+fi
 SAVE_DIR="${SAVE_DIR:-$HOPD_CKPT_ROOT/hopd-mopd-${RUN_TAG}-${SLURM_JOB_ID:-local}}"
 RUN_LOG_DIR="$HOPD_LOG_DIR/mopd_${SLURM_JOB_ID:-$(date +%Y%m%d_%H%M%S)}"
 mkdir -p "$RUN_LOG_DIR" "$SAVE_DIR" "$RUN_LOG_DIR/rollouts" "$RUN_LOG_DIR/val"
@@ -255,9 +278,10 @@ python3 -m verl.trainer.main_ppo \
     distillation.distillation_loss.loss_mode=$LOSS_MODE \
     distillation.distillation_loss.topk=$TOPK \
     distillation.distillation_loss.use_policy_gradient=True \
-    distillation.distillation_loss.use_task_rewards=False \
+    distillation.distillation_loss.use_task_rewards=$USE_TASK_REWARDS \
     distillation.distillation_loss.loss_max_clamp=10.0 \
     distillation.distillation_loss.log_prob_min_clamp=-10.0 \
+    ${MIX_ARGS[@]+"${MIX_ARGS[@]}"} \
     \
     trainer.logger="$HOPD_LOGGER" \
     trainer.rollout_data_dir=$RUN_LOG_DIR/rollouts \

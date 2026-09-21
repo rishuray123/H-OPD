@@ -95,6 +95,7 @@ def load_rollout_stats(run: str, subdir: str) -> dict[int, dict[str, float]]:
             continue
         acc: list[float] = []
         vl: list[float] = []
+        alpha: list[float] = []
         with open(path, errors="replace") as f:
             for line in f:
                 line = line.strip()
@@ -108,10 +109,16 @@ def load_rollout_stats(run: str, subdir: str) -> dict[int, dict[str, float]]:
                     acc.append(float(rec["acc"]))
                 if isinstance(rec.get("is_vl"), (int, float)):
                     vl.append(float(rec["is_vl"]))
-        if acc:
-            stats[step] = {"n": float(len(acc)), "acc": sum(acc) / len(acc)}
+                if isinstance(rec.get("alpha_vl"), (int, float)):
+                    alpha.append(float(rec["alpha_vl"]))
+        if acc or alpha:
+            stats[step] = {"n": float(max(len(acc), len(alpha)))}
+            if acc:
+                stats[step]["acc"] = sum(acc) / len(acc)
             if vl:
                 stats[step]["vl_frac"] = sum(vl) / len(vl)
+            if alpha:
+                stats[step]["alpha_vl"] = sum(alpha) / len(alpha)
     return stats
 
 
@@ -159,9 +166,12 @@ def render(run: str, args) -> str:
     if not order:
         return f"run {run}\nno steps logged yet — training is still starting up."
 
+    show_alpha = any("alpha_vl" in v for v in train_roll.values())
     headers = ["step"] + [h for h, _ in cols]
     if train_roll:
         headers += ["acc", "n"]
+        if show_alpha:
+            headers += ["alpha_vl"]
     if val_roll:
         headers += ["val_acc"]
 
@@ -172,6 +182,9 @@ def render(run: str, args) -> str:
             r = train_roll.get(step, {})
             acc = r.get("acc")
             row += [f"{acc:.3f}" if acc is not None else "-", str(int(r["n"])) if "n" in r else "-"]
+            if show_alpha:
+                a = r.get("alpha_vl")
+                row += [f"{a:.3f}" if a is not None else "-"]
         if val_roll:
             acc = val_roll.get(step, {}).get("acc")
             row += [f"{acc:.3f}" if acc is not None else "-"]

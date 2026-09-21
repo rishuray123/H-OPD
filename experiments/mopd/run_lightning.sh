@@ -1,7 +1,8 @@
 #!/bin/bash
 # Lightning 3-GPU MOPD. Usage:
-#   bash experiments/mopd/run_lightning.sh smoke   # first 32 rows of real parquet, 2 steps
+#   bash experiments/mopd/run_lightning.sh smoke   # routed MOPD, 96 rows, 2 steps
 #   bash experiments/mopd/run_lightning.sh full    # all 55k, 1 epoch
+#   bash experiments/mopd/run_lightning.sh mix     # paper-style entropy mix, 96 rows, 2 steps
 set -euo pipefail
 
 MODE="${1:-smoke}"
@@ -43,8 +44,15 @@ case "$MODE" in
         unset STEPS || true
         echo "FULL: all rows of real H-OPD parquet, 1 epoch, ckpt every 50 steps"
         ;;
+    mix)
+        export MOPD_MAX_ROWS="${MOPD_MAX_ROWS:-96}"
+        export STEPS="${STEPS:-2}"
+        export MOPD_FULL=0
+        export HOPD_MIX=1
+        echo "MIX smoke: both teachers on each Y, entropy blend, ${MOPD_MAX_ROWS} rows, STEPS=${STEPS}"
+        ;;
     *)
-        echo "Usage: $0 smoke|full" >&2
+        echo "Usage: $0 smoke|full|mix" >&2
         exit 1
         ;;
 esac

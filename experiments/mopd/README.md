@@ -61,6 +61,7 @@ After clone / venv / `bootstrap_verl.sh` / `download_data.py`:
 cd ~/H-OPD
 source "$HOPD_VENV/bin/activate"
 bash experiments/mopd/run_lightning.sh smoke   # wait for Done.
+bash experiments/mopd/run_lightning.sh mix     # paper mix: both teachers on each Y
 bash experiments/mopd/run_lightning.sh full
 ```
 
@@ -92,6 +93,24 @@ Rollout JSONL lives in `logs/mopd_latest/rollouts/<step>.jsonl` (one row per
 sample: prompt, response, `acc`, `is_vl`). Validation dumps land in `val/` when
 `TEST_FREQ` is set — it is off by default since training rollouts already show
 generations.
+
+## Paper mix (entropy arbitration)
+
+Routed MOPD is the default (`HOPD_MIX` unset). Paper H-OPD scores the **same**
+student \(Y\) with both teachers and blends \(p(y_t)\) by top-k entropy
+(low entropy → higher weight). That is `distillation.mix_teachers=True` on
+verl `hopd`. Images are kept on every row so the VL teacher can see them; the
+text teacher is called without pixels.
+
+```bash
+bash experiments/mopd/run_lightning.sh mix          # 96 rows, 2 steps
+# or:
+HOPD_MIX=1 MOPD_MAX_ROWS=96 STEPS=2 bash experiments/mopd/run_ls6.sh
+```
+
+Rollouts gain `alpha_vl` (1 = VL teacher won that sample). Task accuracy in the
+loss is still off unless `HOPD_TASK_REWARD=1` **and** `actor_rollout_ref.rollout.n>=4`
+(GRPO groups). Do not flip that on a `n=1` run.
 
 ## Lonestar6
 

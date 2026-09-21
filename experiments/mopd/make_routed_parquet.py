@@ -94,6 +94,11 @@ def main() -> None:
     # about 256 tokens and keeps VL prompts inside max_prompt_length.
     p.add_argument("--image_max_pixels", type=int, default=256 * 32 * 32)
     p.add_argument("--image_min_pixels", type=int, default=4 * 32 * 32)
+    p.add_argument(
+        "--keep_all_images",
+        action="store_true",
+        help="Keep images on text-routed rows too (paper H-OPD mix). Default: drop images on odd/text rows.",
+    )
     args = p.parse_args()
     src = Path(args.src)
     out = Path(args.out)
@@ -110,7 +115,9 @@ def main() -> None:
         if isinstance(first, (list, tuple)) and isinstance(first[0], dict):
             print(f"image struct fields in: {sorted(first[0])}")
         cleaned = [
-            None if ds == "hopd_text" else _clean_images(im, args.image_max_pixels, args.image_min_pixels)
+            None
+            if (ds == "hopd_text" and not args.keep_all_images)
+            else _clean_images(im, args.image_max_pixels, args.image_min_pixels)
             for ds, im in zip(df["data_source"], df["images"])
         ]
         df["images"] = cleaned
@@ -124,7 +131,7 @@ def main() -> None:
     print(f"Wrote {out} n={n} vl={n_vl} text={n_text}")
     if "images" in df.columns:
         kept = sum(1 for im in df["images"] if im is not None and len(im) > 0)
-        print(f"rows carrying images: {kept} (expect {n_vl})")
+        print(f"rows carrying images: {kept} (expect {n if args.keep_all_images else n_vl})")
 
 
 if __name__ == "__main__":
