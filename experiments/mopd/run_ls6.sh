@@ -58,7 +58,8 @@ if [[ "$MAX_ROWS" -gt 0 ]]; then
 else
     MOPD_TRAIN="$HOPD_DATA_ROOT/mopd/train_routed.parquet"
 fi
-python "$HOPD_HOME/experiments/mopd/make_routed_parquet.py" --src "$SRC" --out "$MOPD_TRAIN" --max_rows "$MAX_ROWS"
+python "$HOPD_HOME/experiments/mopd/make_routed_parquet.py" --src "$SRC" --out "$MOPD_TRAIN" \
+    --max_rows "$MAX_ROWS" --image_max_pixels "${MOPD_IMAGE_MAX_PIXELS:-262144}"
 VAL_FILE="$MOPD_TRAIN"
 if [[ "${MOPD_FULL:-0}" == "1" ]]; then
     _val="$(find "$HOPD_DATA_ROOT" -name 'mathvista_200_test.parquet' | head -1 || true)"
@@ -90,12 +91,13 @@ MAX_RESPONSE="${MAX_RESPONSE:-512}"
 FILTER_OVERLONG=True
 TRUNCATION=error
 SAVE_FREQ=-1
-TEST_FREQ=-1
+# Every training step dumps rollouts, so validation stays off unless asked for.
+TEST_FREQ="${TEST_FREQ:--1}"
 EPOCHS=1
 STEP_ARGS=()
 if [[ "${MOPD_FULL:-0}" == "1" ]]; then
     SAVE_FREQ="${SAVE_FREQ_FULL:-50}"
-    TEST_FREQ="${TEST_FREQ_FULL:-50}"
+    TEST_FREQ="${TEST_FREQ:-${TEST_FREQ_FULL:-50}}"
     EPOCHS="${EPOCHS:-1}"
     RUN_TAG="full"
 elif [[ "${MAX_ROWS:-0}" -gt 0 ]]; then
@@ -115,7 +117,14 @@ TEACHER_GPUS=2
 GPUS_ON_NODE=3
 SAVE_DIR="${SAVE_DIR:-$HOPD_CKPT_ROOT/hopd-mopd-${RUN_TAG}-${SLURM_JOB_ID:-local}}"
 RUN_LOG_DIR="$HOPD_LOG_DIR/mopd_${SLURM_JOB_ID:-$(date +%Y%m%d_%H%M%S)}"
-mkdir -p "$RUN_LOG_DIR" "$SAVE_DIR"
+mkdir -p "$RUN_LOG_DIR" "$SAVE_DIR" "$RUN_LOG_DIR/rollouts" "$RUN_LOG_DIR/val"
+
+export TENSORBOARD_DIR="${TENSORBOARD_DIR:-$RUN_LOG_DIR/tensorboard}"
+export VERL_FILE_LOGGER_PATH="${VERL_FILE_LOGGER_PATH:-$RUN_LOG_DIR/metrics.jsonl}"
+ln -sfn "$RUN_LOG_DIR" "$HOPD_LOG_DIR/mopd_latest"
+echo "Live view:  tensorboard --logdir $TENSORBOARD_DIR --port 6006"
+echo "Metrics:    python3 $HOPD_HOME/experiments/mopd/watch.py --follow"
+echo "Rollouts:   python3 $HOPD_HOME/experiments/mopd/show_rollouts.py"
 
 cleanup() {
     if [[ "${SKIP_RAY_CLEANUP:-0}" != "1" ]]; then
@@ -190,11 +199,12 @@ python3 -m verl.trainer.main_ppo \
     data.truncation=$TRUNCATION \
     data.shuffle=True \
     data.image_key=images \
+    data.image_patch_size=16 \
     \
     algorithm.adv_estimator=grpo \
     algorithm.use_kl_in_reward=False \
     \
-    reward.custom_reward_function.path=$HOPD_HOME/experiments/mopd/zero_reward.py \
+    reward.custom_reward_function.path=$HOPD_HOME/experiments/mopd/task_reward.py \
     reward.custom_reward_function.name=compute_score \
     \
     actor_rollout_ref.model.path=$STUDENT_MODEL \
@@ -250,6 +260,9 @@ python3 -m verl.trainer.main_ppo \
     distillation.distillation_loss.log_prob_min_clamp=-10.0 \
     \
     trainer.logger="$HOPD_LOGGER" \
+    trainer.rollout_data_dir=$RUN_LOG_DIR/rollouts \
+    trainer.validation_data_dir=$RUN_LOG_DIR/val \
+    trainer.log_val_generations=${LOG_VAL_GENERATIONS:-8} \
     trainer.project_name=$HOPD_WANDB_PROJECT \
     trainer.experiment_name=hopd-mopd-${RUN_TAG}-${SLURM_JOB_ID:-local} \
     trainer.nnodes=1 \

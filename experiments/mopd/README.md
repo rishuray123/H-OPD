@@ -13,6 +13,20 @@ text length, and `filter_overlong_prompts=True` must stay on — it measures the
 processed length and drops rows that would otherwise break `DataProto.concat`.
 That filtering is why the smoke slices more rows than 2 steps consume.
 
+A full-resolution image alone blows that budget, so `make_routed_parquet.py`
+writes `max_pixels`/`min_pixels` into every image struct (`--image_max_pixels`,
+default 256·32·32 ≈ 256 image tokens); `fetch_image` honours them in both the
+filter and the rollout. Check the outcome on CPU before booking GPUs:
+
+```bash
+python3 experiments/mopd/probe_lengths.py --parquet scratch/data/mopd/train_routed_96.parquet
+```
+
+It prints prompt-length percentiles per `data_source` and shows the real
+exception for rows veRL would silently skip. If `hopd_vl` shows `over budget:
+0/8`, the VL rows will survive; the run's own `filter dataset len:` should then
+be close to `dataset len:`.
+
 ## Before any run
 
 ```bash
@@ -38,6 +52,35 @@ source "$HOPD_VENV/bin/activate"
 bash experiments/mopd/run_lightning.sh smoke   # wait for Done.
 bash experiments/mopd/run_lightning.sh full
 ```
+
+## Watching a run
+
+Every run writes to `logs/mopd_<id>/`, with `logs/mopd_latest` symlinked to the
+newest one. Loggers default to `console`, `tensorboard`, and `file`, and each
+training step dumps its rollouts, so all of this works mid-run:
+
+```bash
+python3 experiments/mopd/watch.py --follow            # metrics table, refreshes
+python3 experiments/mopd/show_rollouts.py --n 3       # what the student just wrote
+python3 experiments/mopd/show_rollouts.py --step all --stats
+tensorboard --logdir logs/mopd_latest/tensorboard --port 6006
+python3 experiments/mopd/watch.py --plot plots/ --csv metrics.csv
+```
+
+What to read as progress:
+
+- `distill_loss` down and `teacher_mass` up — the student's distribution is
+  moving onto the teacher's. This is the actual training objective.
+- `acc` — accuracy from `task_reward.py`, computed on every rollout. It is
+  **reported only**: `score` stays 0.0 so the distillation loss never sees it.
+  This is the honest "is the student getting better" number.
+- `entropy` falling with `resp_len` stable is normal sharpening; `resp_len`
+  collapsing to a few tokens or `grad_norm` spiking means something is wrong.
+
+Rollout JSONL lives in `logs/mopd_latest/rollouts/<step>.jsonl` (one row per
+sample: prompt, response, `acc`, `is_vl`). Validation dumps land in `val/` when
+`TEST_FREQ` is set — it is off by default since training rollouts already show
+generations.
 
 ## Lonestar6
 

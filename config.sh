@@ -22,7 +22,8 @@ export HOPD_DATA_ROOT="${HOPD_DATA_ROOT:-$HOPD_SCRATCH/data}"
 export HOPD_CKPT_ROOT="${HOPD_CKPT_ROOT:-$HOPD_SCRATCH/checkpoints}"
 export HOPD_LOG_DIR="${HOPD_LOG_DIR:-$HOPD_HOME/logs}"
 export HOPD_WANDB_PROJECT="${HOPD_WANDB_PROJECT:-hopd}"
-export HOPD_LOGGER="${HOPD_LOGGER:-[\"console\"]}"
+# tensorboard needs no login (unlike wandb); file writes machine-readable metrics.
+export HOPD_LOGGER="${HOPD_LOGGER:-[\"console\",\"tensorboard\",\"file\"]}"
 
 hopd_activate_env() {
     if [[ -n "${HOPD_ENV_SCRIPT:-}" && -f "$HOPD_ENV_SCRIPT" ]]; then
