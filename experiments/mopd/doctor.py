@@ -66,13 +66,26 @@ except Exception as e:  # noqa: BLE001
     line("transformers import FAILED", f"{type(e).__name__}: {e}")
     BAD.append("transformers does not import")
 
-print("\n== numpy / scipy ==")
-for pkg in ("numpy", "scipy"):
+print("\n== numpy / scipy / numba ==")
+# vLLM workers import numba (numpy<=2.2); scipy needs numpy>=2.0; veRL declares
+# numpy<2.0.0. Only numpy 2.2.x keeps all of them importable.
+for pkg in ("numpy", "scipy", "numba", "pandas"):
     try:
         m = __import__(pkg)
         line(pkg, m.__version__)
     except Exception as e:  # noqa: BLE001
         line(pkg, f"FAILED {type(e).__name__}: {e}")
+        BAD.append(f"{pkg} does not import")
+try:
+    import numpy as _np
+
+    _major, _minor = (int(x) for x in _np.__version__.split(".")[:2])
+    if (_major, _minor) > (2, 2):
+        BAD.append(f"numpy {_np.__version__} > 2.2 breaks numba inside the vLLM worker (pin numpy==2.2.6)")
+    elif _major < 2:
+        BAD.append(f"numpy {_np.__version__} < 2.0 breaks scipy (pin numpy==2.2.6)")
+except Exception:  # noqa: BLE001
+    pass
 
 print("\n== vllm / verl ==")
 for mod in ("vllm", "verl"):
@@ -82,6 +95,14 @@ for mod in ("vllm", "verl"):
     except Exception as e:  # noqa: BLE001
         line(mod, f"FAILED {type(e).__name__}: {e}")
         BAD.append(f"{mod} does not import")
+
+try:
+    from vllm.v1.spec_decode.ngram_proposer import NgramProposer  # noqa: F401
+
+    line("vllm gpu worker imports", "ok")
+except Exception as e:  # noqa: BLE001
+    line("vllm gpu worker imports", f"FAILED {type(e).__name__}: {e}")
+    BAD.append("vLLM worker import fails -> every engine core will fail to start")
 
 print("\n== trainer entrypoint ==")
 try:

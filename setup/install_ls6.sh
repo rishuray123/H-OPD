@@ -56,10 +56,20 @@ if [[ ! -d "$VERL_HOME/.git" ]]; then
 fi
 uv pip install -e "$VERL_HOME"
 
+# veRL's setup.py still declares numpy<2.0.0 and drags numpy down to 1.26, but
+# vLLM's worker imports numba (needs numpy<=2.2) and scipy needs numpy>=2.0.
+# Only 2.2.x satisfies all three, so pin it AFTER the editable veRL install.
+uv pip install "numpy==2.2.6"
+
 python - <<'PY'
-import torch, vllm
+import numpy, torch, vllm
+print("numpy", numpy.__version__)
 print("torch", torch.__version__, "cuda", torch.cuda.is_available(), torch.cuda.device_count())
 print("vllm", vllm.__version__)
+import numba
+print("numba", numba.__version__)
+from vllm.v1.spec_decode.ngram_proposer import NgramProposer  # numba/numpy tripwire
+print("vllm worker imports OK")
 PY
 
 echo "OK. source $VENV/bin/activate"
