@@ -45,6 +45,8 @@ bash $HOPD_HOME/setup/bootstrap_verl.sh   # fetch+checkout origin/hopd
 
 ## Status log
 
+- 2026-09-21: **Routed MOPD smoke passed end to end** on Lightning (3 of 4× L40S 48GB): 96-row slice, 2 steps, ~53s then ~22s per step, `actor/distillation/loss` ≈ −0.8, rewards flat 0.0 by design. Order of failures fixed to get there: Ray bootstrap → numpy 2.2.6 → zero reward fn → prompt-length filter → flash_attn removal → image struct normalization. Caveat: `prompt_length/max` was only 226, i.e. text-sized, so confirm VL rows survive filtering before trusting the mix. `response_length/clip_ratio` 0.5–0.625 at 512 tokens, so raise `MAX_RESPONSE` for real runs.
+
 - 2026-09-04: Forked H-OPD and verl. Added LS6 harness for stage-1 VL OPD. Install/smoke not run yet.
 - 2026-09-05: veRL default path is `$HOPD_HOME/verl` (nested, gitignored), not a sibling checkout.
 - 2026-09-09: Experiment branch `hopd` created on rishuray123/verl from `ls6` (`044bbba2`). Harness bootstraps `origin/hopd`. Install/smoke not run yet.
