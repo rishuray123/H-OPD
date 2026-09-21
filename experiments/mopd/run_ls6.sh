@@ -192,6 +192,9 @@ python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     algorithm.use_kl_in_reward=False \
     \
+    reward.custom_reward_function.path=$HOPD_HOME/experiments/mopd/zero_reward.py \
+    reward.custom_reward_function.name=compute_score \
+    \
     actor_rollout_ref.model.path=$STUDENT_MODEL \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.model.use_remove_padding=False \
