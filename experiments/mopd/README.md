@@ -6,7 +6,12 @@ GPU split: student 2B on **1** GPU, VL 4B teacher on **1**, text `Qwen3-4B-Instr
 
 Even rows → VL teacher (images kept). Odd rows → text teacher (images cleared).
 
-Smoke uses the **real** `mmfine_reason_sampled_55k_text_prompt.parquet`, first **32** rows only (16 VL + 16 text), 2 trainer steps. Full uses all rows for 1 epoch.
+Smoke uses the **real** `mmfine_reason_sampled_55k_text_prompt.parquet`, first **96** rows (half VL, half text), 2 trainer steps. Full uses all rows for 1 epoch.
+
+`max_prompt_length` is 2048 because image tokens inflate VL prompts far past their
+text length, and `filter_overlong_prompts=True` must stay on — it measures the
+processed length and drops rows that would otherwise break `DataProto.concat`.
+That filtering is why the smoke slices more rows than 2 steps consume.
 
 ## Before any run
 

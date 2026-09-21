@@ -81,7 +81,11 @@ TEACHER_VL="Qwen/Qwen3-VL-4B-Instruct"
 TEACHER_TEXT="Qwen/Qwen3-4B-Instruct-2507"
 TRAIN_BSZ="${TRAIN_BSZ:-8}"
 PPO_MICRO_BSZ=1
-MAX_PROMPT="${MAX_PROMPT:-512}"
+# Image tokens inflate a VL prompt well past the text length, so 512 drops or
+# mismatches most rows. filter_overlong_prompts measures the processed length
+# (images expanded) and must stay True: without it an overlong prompt reaches
+# the agent loop and DataProto.concat fails on mismatched prompt tensors.
+MAX_PROMPT="${MAX_PROMPT:-2048}"
 MAX_RESPONSE="${MAX_RESPONSE:-512}"
 FILTER_OVERLONG=True
 TRUNCATION=error
@@ -96,8 +100,6 @@ if [[ "${MOPD_FULL:-0}" == "1" ]]; then
     RUN_TAG="full"
 elif [[ "${MAX_ROWS:-0}" -gt 0 ]]; then
     STEPS="${STEPS:-2}"
-    FILTER_OVERLONG=False
-    TRUNCATION=left
     STEP_ARGS=(+trainer.total_training_steps="$STEPS")
     RUN_TAG="smoke${MAX_ROWS}"
 else

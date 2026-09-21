@@ -30,7 +30,9 @@ fi
 
 case "$MODE" in
     smoke)
-        export MOPD_MAX_ROWS="${MOPD_MAX_ROWS:-32}"
+        # Overlong VL prompts are dropped by the dataset filter, so slice more
+        # rows than the 2 steps x batch 8 the smoke actually consumes.
+        export MOPD_MAX_ROWS="${MOPD_MAX_ROWS:-96}"
         export STEPS="${STEPS:-2}"
         export MOPD_FULL=0
         echo "SMOKE: real H-OPD parquet, first ${MOPD_MAX_ROWS} rows, STEPS=${STEPS}"
