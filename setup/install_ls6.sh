@@ -48,8 +48,14 @@ uv pip install "transformers[hf_xet]==4.57.6" accelerate datasets peft hf-transf
     "nvidia-ml-py>=12.560.30" "fastapi[standard]>=0.115.0" "optree>=0.13.0" \
     "pydantic>=2.9" "grpcio>=1.62.1" "trl==0.14.0"
 
-uv pip uninstall flash_attn -y 2>/dev/null || true
 uv pip install flashinfer-python==0.3.1 || echo "WARN: flashinfer missing — continuing"
+
+# Required, not optional: verl's padding-free log-prob path calls
+# flash_attn.bert_padding.unpad_input on CUDA regardless of use_remove_padding.
+# Use the prebuilt wheel for torch 2.9 / cu12 / cp312 — a source build needs
+# nvcc and about an hour.
+FLASH_ATTN_WHEEL="${FLASH_ATTN_WHEEL:-https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3%2Bcu12torch2.9cxx11abiTRUE-cp312-cp312-linux_x86_64.whl}"
+uv pip install "$FLASH_ATTN_WHEEL"
 
 if [[ ! -d "$VERL_HOME/.git" ]]; then
     bash "$HOPD_HOME/setup/bootstrap_verl.sh" "$VERL_HOME"
@@ -70,6 +76,8 @@ import numba
 print("numba", numba.__version__)
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer  # numba/numpy tripwire
 print("vllm worker imports OK")
+from flash_attn.bert_padding import unpad_input  # verl compute_log_prob tripwire
+print("flash_attn.bert_padding OK")
 PY
 
 echo "OK. source $VENV/bin/activate"
