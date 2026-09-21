@@ -56,3 +56,5 @@ bash $HOPD_HOME/setup/bootstrap_verl.sh   # fetch+checkout origin/hopd
 - 2026-09-15: Login preflight at `a04ceff` OK; no mmfine parquet yet. Dump sbatch now installs venv and downloads data if missing.
 - 2026-09-15: Jobs `3442692` (`idev`) and `3443317` (`hopd-tokdump`) pending on `gpu-a100` (`Priority`). Cancel leftover `idev` if using sbatch.
 - 2026-09-15: Routed MOPD job: `sbatch experiments/mopd/run_ls6.sh` (1 GPU student + VL 4B + text 4B). Not H-OPD entropy mix.
+- 2026-09-21: Lightning gotchas: `ray start --block` in the background leaves GCS unreachable (`Failed to connect to GCS`) — start it in the foreground and wipe `/tmp/ray`. `transformers` hides `PreTrainedModel`/`MistralForSequenceClassification` whenever `is_torch_available()` is False (half-done install), so fix the env, not the imports. `experiments/mopd/doctor.py` checks the whole chain. Bare `python` on a Studio can be base conda even when the prompt shows `(.venv)`.
+- 2026-09-19: MOPD smoke slices the real mmfine parquet (`MOPD_MAX_ROWS=32`, 2 steps). Full: `MOPD_FULL=1` (1 epoch). Lightning: `bash experiments/mopd/run_lightning.sh smoke` then `full`.

@@ -19,7 +19,7 @@ export PATH="$HOME/.local/bin:$PATH"
 export HOPD_HOME="${HOPD_HOME:-$SCRATCH/hopd/H-OPD}"
 export HOPD_VENV="${HOPD_VENV:-$SCRATCH/hopd/.venv}"
 export HOPD_SCRATCH="${HOPD_SCRATCH:-$SCRATCH/hopd}"
-export HOPD_ENV_SCRIPT="${HOPD_ENV_SCRIPT:-$HOPD_HOME/setup/env_vars.ls6.sh}"
+export HOPD_ENV_SCRIPT="${HOPD_ENV_SCRIPT-$HOPD_HOME/setup/env_vars.ls6.sh}"
 
 if [[ ! -f "$HOPD_HOME/config.sh" ]]; then
     echo "ERROR: $HOPD_HOME is not the H-OPD repo" >&2
@@ -30,7 +30,11 @@ source "$HOPD_HOME/config.sh"
 cd "$HOPD_HOME"
 mkdir -p "$HOPD_HOME/logs" "$HOPD_DATA_ROOT" "$HOPD_CKPT_ROOT"
 
-if [[ ! -x "$HOPD_VENV/bin/python" ]]; then
+if [[ ! -x "${HOPD_VENV:-}/bin/python" ]]; then
+    if [[ "${SKIP_INSTALL:-0}" == "1" ]]; then
+        echo "ERROR: no venv at HOPD_VENV=${HOPD_VENV:-} (SKIP_INSTALL=1)" >&2
+        exit 1
+    fi
     echo "No venv — setup/install_ls6.sh"
     bash "$HOPD_HOME/setup/install_ls6.sh"
 fi
@@ -48,11 +52,19 @@ if [[ -z "$SRC" || ! -f "$SRC" ]]; then
     exit 1
 fi
 
-MOPD_TRAIN="$HOPD_DATA_ROOT/mopd/train_routed.parquet"
-python "$HOPD_HOME/experiments/mopd/make_routed_parquet.py" --src "$SRC" --out "$MOPD_TRAIN"
-VAL_FILE="$(find "$HOPD_DATA_ROOT" -name 'mathvista_200_test.parquet' | head -1 || true)"
-if [[ -z "$VAL_FILE" || ! -f "$VAL_FILE" ]]; then
-    VAL_FILE="$MOPD_TRAIN"
+MAX_ROWS="${MOPD_MAX_ROWS:-0}"
+if [[ "$MAX_ROWS" -gt 0 ]]; then
+    MOPD_TRAIN="$HOPD_DATA_ROOT/mopd/train_routed_${MAX_ROWS}.parquet"
+else
+    MOPD_TRAIN="$HOPD_DATA_ROOT/mopd/train_routed.parquet"
+fi
+python "$HOPD_HOME/experiments/mopd/make_routed_parquet.py" --src "$SRC" --out "$MOPD_TRAIN" --max_rows "$MAX_ROWS"
+VAL_FILE="$MOPD_TRAIN"
+if [[ "${MOPD_FULL:-0}" == "1" ]]; then
+    _val="$(find "$HOPD_DATA_ROOT" -name 'mathvista_200_test.parquet' | head -1 || true)"
+    if [[ -n "$_val" && -f "$_val" ]]; then
+        VAL_FILE="$_val"
+    fi
 fi
 
 export VLLM_USE_V1=1
@@ -67,45 +79,96 @@ export VERL_USE_UV=0
 STUDENT_MODEL="Qwen/Qwen3-VL-2B-Instruct"
 TEACHER_VL="Qwen/Qwen3-VL-4B-Instruct"
 TEACHER_TEXT="Qwen/Qwen3-4B-Instruct-2507"
-STEPS="${STEPS:-5}"
-TRAIN_BSZ=8
+TRAIN_BSZ="${TRAIN_BSZ:-8}"
 PPO_MICRO_BSZ=1
-MAX_PROMPT=512
-MAX_RESPONSE=512
+MAX_PROMPT="${MAX_PROMPT:-512}"
+MAX_RESPONSE="${MAX_RESPONSE:-512}"
+FILTER_OVERLONG=True
+TRUNCATION=error
+SAVE_FREQ=-1
+TEST_FREQ=-1
+EPOCHS=1
+STEP_ARGS=()
+if [[ "${MOPD_FULL:-0}" == "1" ]]; then
+    SAVE_FREQ="${SAVE_FREQ_FULL:-50}"
+    TEST_FREQ="${TEST_FREQ_FULL:-50}"
+    EPOCHS="${EPOCHS:-1}"
+    RUN_TAG="full"
+elif [[ "${MAX_ROWS:-0}" -gt 0 ]]; then
+    STEPS="${STEPS:-2}"
+    FILTER_OVERLONG=False
+    TRUNCATION=left
+    STEP_ARGS=(+trainer.total_training_steps="$STEPS")
+    RUN_TAG="smoke${MAX_ROWS}"
+else
+    STEPS="${STEPS:-5}"
+    STEP_ARGS=(+trainer.total_training_steps="$STEPS")
+    RUN_TAG="steps${STEPS}"
+fi
 LR=1e-6
 LOSS_MODE="k1"
 TOPK=8
 STUDENT_GPUS=1
 TEACHER_GPUS=2
 GPUS_ON_NODE=3
-SAVE_DIR="$HOPD_CKPT_ROOT/hopd-mopd-${SLURM_JOB_ID:-local}"
+SAVE_DIR="${SAVE_DIR:-$HOPD_CKPT_ROOT/hopd-mopd-${RUN_TAG}-${SLURM_JOB_ID:-local}}"
 RUN_LOG_DIR="$HOPD_LOG_DIR/mopd_${SLURM_JOB_ID:-$(date +%Y%m%d_%H%M%S)}"
 mkdir -p "$RUN_LOG_DIR" "$SAVE_DIR"
 
 cleanup() {
-    ray stop --force 2>/dev/null || true
+    if [[ "${SKIP_RAY_CLEANUP:-0}" != "1" ]]; then
+        ray stop --force 2>/dev/null || true
+    fi
     kill $(jobs -p) 2>/dev/null || true
     wait
 }
 trap cleanup SIGINT SIGTERM EXIT
 
+echo "Checking trainer imports before touching GPUs"
+python3 -c "import verl.trainer.main_ppo" || {
+    echo "ERROR: verl.trainer.main_ppo does not import in $HOPD_VENV" >&2
+    echo "       python3 $HOPD_HOME/experiments/mopd/doctor.py" >&2
+    exit 1
+}
+
+unset RAY_ADDRESS ip_head || true
 if [[ -n "${SLURM_JOB_NODELIST:-}" ]]; then
     nodes=$(scontrol show hostnames "$SLURM_JOB_NODELIST")
     nodes_array=($nodes)
     head_node=${nodes_array[0]}
     head_node_ip=$(getent hosts "$head_node" | awk '{print $1}')
 else
-    head_node_ip=$(hostname -I | awk '{print $1}')
+    head_node_ip="${RAY_HEAD_IP:-$(hostname -I | awk '{print $1}')}"
 fi
 
-ray stop --force 2>/dev/null || true
-RAY_PORT=6379
+RAY_PORT="${RAY_PORT:-6379}"
 export ip_head=$head_node_ip:$RAY_PORT
 export RAY_ADDRESS=$ip_head
-ray start --head --node-ip-address="$head_node_ip" --port=$RAY_PORT \
-    --num-cpus=32 --num-gpus=$GPUS_ON_NODE --block \
-    > "$RUN_LOG_DIR/ray_head.log" 2>&1 &
-sleep 15
+echo "Ray head $ip_head"
+
+# Foreground start: `--block` in the background leaves GCS unreachable, and a
+# stale /tmp/ray from a failed start keeps pointing at the old address.
+if [[ "${SKIP_RAY_START:-0}" != "1" ]]; then
+    ray stop --force 2>/dev/null || true
+    rm -rf /tmp/ray
+    ray start --head --node-ip-address="$head_node_ip" --port=$RAY_PORT \
+        --num-cpus="${RAY_NUM_CPUS:-16}" --num-gpus=$GPUS_ON_NODE \
+        --disable-usage-stats \
+        > "$RUN_LOG_DIR/ray_head.log" 2>&1
+    echo "---- ray_head.log ----"
+    cat "$RUN_LOG_DIR/ray_head.log"
+fi
+
+for i in $(seq 1 20); do
+    if ray status >/dev/null 2>&1; then
+        break
+    fi
+    if [[ "$i" -eq 20 ]]; then
+        echo "ERROR: Ray GCS unreachable at $ip_head" >&2
+        exit 1
+    fi
+    sleep 3
+done
 ray status
 
 MAX_NUM_TOKENS=$(( MAX_PROMPT + MAX_RESPONSE + 1 ))
@@ -119,10 +182,10 @@ python3 -m verl.trainer.main_ppo \
     data.train_batch_size=$TRAIN_BSZ \
     data.max_prompt_length=$MAX_PROMPT \
     data.max_response_length=$MAX_RESPONSE \
-    data.filter_overlong_prompts=True \
+    data.filter_overlong_prompts=$FILTER_OVERLONG \
     data.filter_overlong_prompts_workers=1 \
     data.dataloader_num_workers=2 \
-    data.truncation='error' \
+    data.truncation=$TRUNCATION \
     data.shuffle=True \
     data.image_key=images \
     \
@@ -183,16 +246,16 @@ python3 -m verl.trainer.main_ppo \
     \
     trainer.logger="$HOPD_LOGGER" \
     trainer.project_name=$HOPD_WANDB_PROJECT \
-    trainer.experiment_name=hopd-mopd-${SLURM_JOB_ID:-local} \
+    trainer.experiment_name=hopd-mopd-${RUN_TAG}-${SLURM_JOB_ID:-local} \
     trainer.nnodes=1 \
     trainer.n_gpus_per_node=$STUDENT_GPUS \
     trainer.resume_mode=disable \
     trainer.default_local_dir=$SAVE_DIR \
     trainer.val_before_train=False \
-    trainer.total_epochs=1 \
-    +trainer.total_training_steps=$STEPS \
-    trainer.save_freq=-1 \
-    trainer.test_freq=-1 \
+    trainer.total_epochs=$EPOCHS \
+    trainer.save_freq=$SAVE_FREQ \
+    trainer.test_freq=$TEST_FREQ \
+    ${STEP_ARGS[@]+"${STEP_ARGS[@]}"} \
     2>&1 | tee "$RUN_LOG_DIR/training.log"
 
 echo "Checkpoints: $SAVE_DIR"
