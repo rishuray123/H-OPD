@@ -130,8 +130,8 @@ MAX_RESPONSE="${MAX_RESPONSE:-512}"
 FILTER_OVERLONG=True
 TRUNCATION=error
 SAVE_FREQ=-1
-# Every training step dumps rollouts, so validation stays off unless asked for.
-TEST_FREQ="${TEST_FREQ:--1}"
+# Smoke: val off. Full: every 50 steps. Must not pre-assign TEST_FREQ=-1
+# or the full-run default below never applies.
 EPOCHS=1
 STEP_ARGS=()
 if [[ "${MOPD_FULL:-0}" == "1" ]]; then
@@ -140,10 +140,12 @@ if [[ "${MOPD_FULL:-0}" == "1" ]]; then
     EPOCHS="${EPOCHS:-1}"
     RUN_TAG="full"
 elif [[ "${MAX_ROWS:-0}" -gt 0 ]]; then
+    TEST_FREQ="${TEST_FREQ:--1}"
     STEPS="${STEPS:-2}"
     STEP_ARGS=(+trainer.total_training_steps="$STEPS")
     RUN_TAG="smoke${MAX_ROWS}"
 else
+    TEST_FREQ="${TEST_FREQ:--1}"
     STEPS="${STEPS:-5}"
     STEP_ARGS=(+trainer.total_training_steps="$STEPS")
     RUN_TAG="steps${STEPS}"
@@ -155,9 +157,15 @@ STUDENT_GPUS=1
 TEACHER_GPUS=2
 GPUS_ON_NODE=3
 USE_TASK_REWARDS=False
+ROLLOUT_N="${HOPD_ROLLOUT_N:-1}"
 if [[ "${HOPD_TASK_REWARD:-0}" == "1" ]]; then
     USE_TASK_REWARDS=True
     export HOPD_TASK_REWARD=1
+    if [[ "$ROLLOUT_N" -lt 4 ]]; then
+        echo "HOPD_TASK_REWARD=1 needs GRPO groups; raising rollout.n from $ROLLOUT_N to 4"
+        ROLLOUT_N=4
+    fi
+    RUN_TAG="${RUN_TAG}-task"
 fi
 MIX_ARGS=()
 if [[ "${HOPD_MIX:-0}" == "1" ]]; then
@@ -277,7 +285,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.enforce_eager=True \
     actor_rollout_ref.rollout.free_cache_engine=True \
     actor_rollout_ref.rollout.max_model_len=$MAX_NUM_TOKENS \
-    actor_rollout_ref.rollout.n=1 \
+    actor_rollout_ref.rollout.n=$ROLLOUT_N \
     actor_rollout_ref.rollout.temperature=1.0 \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
     \
