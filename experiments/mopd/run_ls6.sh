@@ -132,6 +132,8 @@ PPO_MICRO_BSZ=1
 # (images expanded) and must stay True: without it an overlong prompt reaches
 # the agent loop and DataProto.concat fails on mismatched prompt tensors.
 MAX_PROMPT="${MAX_PROMPT:-2048}"
+# Empty means "not set" so the paper block can pick 256.
+_MAX_RESPONSE_SET="${MAX_RESPONSE+x}"
 MAX_RESPONSE="${MAX_RESPONSE:-512}"
 FILTER_OVERLONG=True
 TRUNCATION=error
@@ -188,8 +190,14 @@ if [[ "${HOPD_PAPER:-0}" == "1" ]]; then
     USE_TASK_REWARDS=False
     MIX_ARGS=(distillation.mix_teachers=True distillation.mix_temperature="${HOPD_MIX_TAU:-1.0}")
     RUN_TAG="${RUN_TAG}-paper"
+    if [[ -z "${_MAX_RESPONSE_SET:-}" ]]; then
+        MAX_RESPONSE=256
+    fi
+    USE_TORCH_COMPILE="${USE_TORCH_COMPILE:-False}"
     echo "HOPD_PAPER=1: union Ω_t mix, reverse KL, supervised (no PPO, no task reward)"
+    echo "HOPD_PAPER=1: MAX_RESPONSE=$MAX_RESPONSE use_torch_compile=$USE_TORCH_COMPILE"
 fi
+USE_TORCH_COMPILE="${USE_TORCH_COMPILE:-True}"
 # Student vLLM is colocated with FSDP+Adam on GPU 0. Paper reverse KL
 # keeps full-vocab logits; 0.70 util OOM'd Adam on step 2 of the 20k run.
 if [[ -z "${STUDENT_GPU_UTIL:-}" ]]; then
@@ -300,7 +308,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.model.use_remove_padding=False \
     +actor_rollout_ref.model.override_config.attn_implementation=sdpa \
     actor_rollout_ref.actor.optim.lr=$LR \
-    actor_rollout_ref.actor.use_torch_compile=True \
+    actor_rollout_ref.actor.use_torch_compile=$USE_TORCH_COMPILE \
     actor_rollout_ref.actor.ppo_mini_batch_size=$TRAIN_BSZ \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=$PPO_MICRO_BSZ \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=$(( PPO_MICRO_BSZ * (MAX_PROMPT + MAX_RESPONSE) )) \
