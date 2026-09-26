@@ -8,8 +8,8 @@
 #SBATCH --partition=gpu-a100
 #SBATCH -A ECS26006
 
-# veRL MOPD / paper H-OPD on 3× A100-40GB.
-#   1 GPU student 2B  +  1 GPU VL 4B teacher  +  1 GPU text 4B teacher
+# veRL MOPD / paper H-OPD. 3 GPUs: 1 student + 2 teachers.
+# 4 GPUs: 2-way FSDP student + 1 VL teacher + 1 text teacher (use this for paper).
 # Default: routed MOPD (one teacher per data_source).
 #   HOPD_MIX=1    both teachers, p(y_t) mix + k1/PPO
 #   HOPD_PAPER=1  paper recipe: union Ω_t mix + reverse KL, no PPO
@@ -164,9 +164,36 @@ fi
 LR=1e-6
 LOSS_MODE="k1"
 TOPK=8
-STUDENT_GPUS=1
-TEACHER_GPUS=2
-GPUS_ON_NODE=3
+NGPU=0
+if command -v nvidia-smi >/dev/null 2>&1; then
+    NGPU=$(nvidia-smi -L 2>/dev/null | wc -l | tr -d ' ')
+fi
+TEACHER_GPUS="${TEACHER_GPUS:-2}"
+if [[ -z "${STUDENT_GPUS:-}" ]]; then
+    if [[ "$NGPU" -ge 4 ]]; then
+        STUDENT_GPUS=2
+    else
+        STUDENT_GPUS=1
+    fi
+fi
+GPUS_ON_NODE=$((STUDENT_GPUS + TEACHER_GPUS))
+if [[ "$NGPU" -gt 0 && "$GPUS_ON_NODE" -gt "$NGPU" ]]; then
+    echo "ERROR: need $GPUS_ON_NODE GPUs (student $STUDENT_GPUS + teachers $TEACHER_GPUS), found $NGPU" >&2
+    exit 1
+fi
+echo "GPUs: student=$STUDENT_GPUS teacher=$TEACHER_GPUS (ray --num-gpus=$GPUS_ON_NODE)"
+# generate_sequences chunks the batch across agent.num_workers; size must divide.
+if [[ -z "${AGENT_WORKERS:-}" ]]; then
+    if (( TRAIN_BSZ % 8 == 0 )); then
+        AGENT_WORKERS=8
+    else
+        AGENT_WORKERS=$TRAIN_BSZ
+    fi
+fi
+if (( TRAIN_BSZ % AGENT_WORKERS != 0 )); then
+    echo "ERROR: TRAIN_BSZ=$TRAIN_BSZ must be divisible by AGENT_WORKERS=$AGENT_WORKERS" >&2
+    exit 1
+fi
 USE_TASK_REWARDS=False
 USE_POLICY_GRADIENT=True
 ROLLOUT_N="${HOPD_ROLLOUT_N:-1}"
@@ -319,7 +346,8 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     \
     actor_rollout_ref.rollout.name=vllm \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
+    actor_rollout_ref.rollout.tensor_model_parallel_size=$STUDENT_GPUS \
+    actor_rollout_ref.rollout.agent.num_workers=$AGENT_WORKERS \
     actor_rollout_ref.rollout.gpu_memory_utilization=$STUDENT_GPU_UTIL \
     actor_rollout_ref.rollout.max_num_seqs=$MAX_NUM_SEQS \
     actor_rollout_ref.rollout.enforce_eager=True \

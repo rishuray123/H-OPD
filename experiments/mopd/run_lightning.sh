@@ -16,9 +16,10 @@ if command -v nvidia-smi >/dev/null 2>&1; then
     ngpu=$(nvidia-smi -L 2>/dev/null | wc -l | tr -d ' ')
 fi
 if [[ "$ngpu" -lt 3 ]]; then
-    echo "ERROR: $ngpu GPU(s); routed MOPD needs 3." >&2
+    echo "ERROR: $ngpu GPU(s); routed MOPD needs 3, paper prefers 4 (2 student + 2 teachers)." >&2
     exit 1
 fi
+echo "Visible GPUs: $ngpu"
 
 if [[ -z "${SCRATCH:-}" ]] || [[ ! -d "${SCRATCH:-/nonexistent}" ]]; then
     export HOPD_ENV_SCRIPT=""
