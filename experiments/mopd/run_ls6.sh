@@ -201,7 +201,8 @@ if [[ -z "${STUDENT_GPU_UTIL:-}" ]]; then
 fi
 TEACHER_GPU_UTIL="${TEACHER_GPU_UTIL:-0.70}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-$TRAIN_BSZ}"
-export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+# Do not set expandable_segments: vLLM CuMemAllocator (sleep mode) asserts
+# against it and the engine never starts.
 SAVE_DIR="${SAVE_DIR:-$HOPD_CKPT_ROOT/hopd-mopd-${RUN_TAG}-${SLURM_JOB_ID:-local}}"
 RUN_LOG_DIR="$HOPD_LOG_DIR/mopd_${SLURM_JOB_ID:-$(date +%Y%m%d_%H%M%S)}"
 mkdir -p "$RUN_LOG_DIR" "$SAVE_DIR" "$RUN_LOG_DIR/rollouts" "$RUN_LOG_DIR/val"
