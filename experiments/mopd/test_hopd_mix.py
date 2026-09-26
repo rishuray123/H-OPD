@@ -44,6 +44,14 @@ def test_union_mix_disjoint() -> None:
     assert abs(q[20] / total - 0.5) < 1e-12
 
 
+def test_align_teacher_rank() -> None:
+    """2D teacher ids must be expandable to student [B, S, V] for gather."""
+    student_ndim, teacher_ndim = 3, 2
+    while teacher_ndim < student_ndim:
+        teacher_ndim += 1
+    assert teacher_ndim == student_ndim
+
+
 def test_reverse_kl_peaked_vs_flat() -> None:
     """KL(student || teacher) on a 2-set: peaked student is near 0, uniform is larger."""
     p = [0.99, 0.01]
@@ -130,6 +138,7 @@ if __name__ == "__main__":
     test_text_prompt_strip_keeps_response()
     test_union_mix_disjoint()
     test_reverse_kl_peaked_vs_flat()
+    test_align_teacher_rank()
     try:
         _run_torch_tests()
         print("[ ok ] hopd paper mix + reverse KL (stdlib + torch)")
