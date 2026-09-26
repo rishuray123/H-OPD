@@ -8,9 +8,11 @@
 #SBATCH --partition=gpu-a100
 #SBATCH -A ECS26006
 
-# veRL routed MOPD on 3× A100-40GB (NOT paper H-OPD entropy mix).
+# veRL MOPD / paper H-OPD on 3× A100-40GB.
 #   1 GPU student 2B  +  1 GPU VL 4B teacher  +  1 GPU text 4B teacher
-# Samples alternate hopd_vl / hopd_text via data_source.
+# Default: routed MOPD (one teacher per data_source).
+#   HOPD_MIX=1    both teachers, p(y_t) mix + k1/PPO
+#   HOPD_PAPER=1  paper recipe: union Ω_t mix + reverse KL, no PPO
 #   cd $SCRATCH/hopd/H-OPD && mkdir -p logs && sbatch experiments/mopd/run_ls6.sh
 
 set -euo pipefail
@@ -80,6 +82,10 @@ fi
 
 MAX_ROWS="${MOPD_MAX_ROWS:-0}"
 MIX="${HOPD_MIX:-0}"
+if [[ "${HOPD_PAPER:-0}" == "1" ]]; then
+    MIX=1
+    export HOPD_MIX=1
+fi
 ROUTED_TAG=""
 if [[ "$MAX_ROWS" -gt 0 ]]; then
     ROUTED_TAG="_${MAX_ROWS}"
@@ -157,8 +163,9 @@ STUDENT_GPUS=1
 TEACHER_GPUS=2
 GPUS_ON_NODE=3
 USE_TASK_REWARDS=False
+USE_POLICY_GRADIENT=True
 ROLLOUT_N="${HOPD_ROLLOUT_N:-1}"
-if [[ "${HOPD_TASK_REWARD:-0}" == "1" ]]; then
+if [[ "${HOPD_TASK_REWARD:-0}" == "1" && "${HOPD_PAPER:-0}" != "1" ]]; then
     USE_TASK_REWARDS=True
     export HOPD_TASK_REWARD=1
     if [[ "$ROLLOUT_N" -lt 4 ]]; then
@@ -168,9 +175,17 @@ if [[ "${HOPD_TASK_REWARD:-0}" == "1" ]]; then
     RUN_TAG="${RUN_TAG}-task"
 fi
 MIX_ARGS=()
-if [[ "${HOPD_MIX:-0}" == "1" ]]; then
+if [[ "${HOPD_MIX:-0}" == "1" && "${HOPD_PAPER:-0}" != "1" ]]; then
     MIX_ARGS=(distillation.mix_teachers=True distillation.mix_temperature="${HOPD_MIX_TAU:-1.0}")
     RUN_TAG="${RUN_TAG}-mix"
+fi
+if [[ "${HOPD_PAPER:-0}" == "1" ]]; then
+    LOSS_MODE="reverse_kl_topk"
+    USE_POLICY_GRADIENT=False
+    USE_TASK_REWARDS=False
+    MIX_ARGS=(distillation.mix_teachers=True distillation.mix_temperature="${HOPD_MIX_TAU:-1.0}")
+    RUN_TAG="${RUN_TAG}-paper"
+    echo "HOPD_PAPER=1: union Ω_t mix, reverse KL, supervised (no PPO, no task reward)"
 fi
 SAVE_DIR="${SAVE_DIR:-$HOPD_CKPT_ROOT/hopd-mopd-${RUN_TAG}-${SLURM_JOB_ID:-local}}"
 RUN_LOG_DIR="$HOPD_LOG_DIR/mopd_${SLURM_JOB_ID:-$(date +%Y%m%d_%H%M%S)}"
@@ -311,7 +326,7 @@ python3 -m verl.trainer.main_ppo \
     +distillation.teacher_models.text.inference.max_model_len=$MAX_NUM_TOKENS \
     distillation.distillation_loss.loss_mode=$LOSS_MODE \
     distillation.distillation_loss.topk=$TOPK \
-    distillation.distillation_loss.use_policy_gradient=True \
+    distillation.distillation_loss.use_policy_gradient=$USE_POLICY_GRADIENT \
     distillation.distillation_loss.use_task_rewards=$USE_TASK_REWARDS \
     distillation.distillation_loss.loss_max_clamp=10.0 \
     distillation.distillation_loss.log_prob_min_clamp=-10.0 \

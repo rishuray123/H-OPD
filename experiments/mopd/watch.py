@@ -96,6 +96,7 @@ def load_rollout_stats(run: str, subdir: str) -> dict[int, dict[str, float]]:
         acc: list[float] = []
         vl: list[float] = []
         alpha: list[float] = []
+        omega: list[float] = []
         with open(path, errors="replace") as f:
             for line in f:
                 line = line.strip()
@@ -111,14 +112,18 @@ def load_rollout_stats(run: str, subdir: str) -> dict[int, dict[str, float]]:
                     vl.append(float(rec["is_vl"]))
                 if isinstance(rec.get("alpha_vl"), (int, float)):
                     alpha.append(float(rec["alpha_vl"]))
-        if acc or alpha:
-            stats[step] = {"n": float(max(len(acc), len(alpha)))}
+                if isinstance(rec.get("omega_k"), (int, float)):
+                    omega.append(float(rec["omega_k"]))
+        if acc or alpha or omega:
+            stats[step] = {"n": float(max(len(acc), len(alpha), len(omega)))}
             if acc:
                 stats[step]["acc"] = sum(acc) / len(acc)
             if vl:
                 stats[step]["vl_frac"] = sum(vl) / len(vl)
             if alpha:
                 stats[step]["alpha_vl"] = sum(alpha) / len(alpha)
+            if omega:
+                stats[step]["omega_k"] = sum(omega) / len(omega)
     return stats
 
 

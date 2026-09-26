@@ -1,6 +1,8 @@
-# Routed MOPD (veRL), not paper H-OPD
+# Routed MOPD and paper H-OPD (veRL)
 
-veRL assigns **one** teacher per sample via `data_source`. That is **not** token-level mix of VL + text on the same \(Y\).
+Default: veRL assigns **one** teacher per sample via `data_source` (routed MOPD).
+`HOPD_PAPER=1` is the paper recipe: both teachers on the same \(Y\), mix on
+\(\Omega_t = K_V \cup K_T\), reverse KL \(D_{\mathrm{KL}}(\pi_\theta \| q_A)\).
 
 GPU split: student 2B on **1** GPU, VL 4B teacher on **1**, text `Qwen3-4B-Instruct-2507` on **1**. A 1×H100 dump machine cannot run this.
 
@@ -61,7 +63,8 @@ After clone / venv / `bootstrap_verl.sh` / `download_data.py`:
 cd ~/H-OPD
 source "$HOPD_VENV/bin/activate"
 bash experiments/mopd/run_lightning.sh smoke   # wait for Done.
-bash experiments/mopd/run_lightning.sh mix     # paper mix: both teachers on each Y
+bash experiments/mopd/run_lightning.sh mix     # both teachers, p(y_t) mix + k1
+bash experiments/mopd/run_lightning.sh paper   # paper H-OPD: union Ω_t + reverse KL
 bash experiments/mopd/run_lightning.sh full
 ```
 
@@ -94,23 +97,32 @@ sample: prompt, response, `acc`, `is_vl`). Validation dumps land in `val/` when
 `TEST_FREQ` is set — it is off by default since training rollouts already show
 generations.
 
-## Paper mix (entropy arbitration)
+## Paper H-OPD (`HOPD_PAPER=1`)
 
-Routed MOPD is the default (`HOPD_MIX` unset). Paper H-OPD scores the **same**
-student \(Y\) with both teachers and blends \(p(y_t)\) by top-k entropy
-(low entropy → higher weight). That is `distillation.mix_teachers=True` on
-verl `hopd`. Images are kept on every row so the VL teacher can see them; the
-text teacher is called without pixels.
+This is the paper recipe on this stack. Both teachers score the same student
+\(Y\). Each is renormalized on its own top-\(k\), then mixed on
+\(\Omega_t = K_V \cup K_T\) with entropy weights \(\alpha \propto \exp(-H/\tau)\).
+The student is trained with reverse KL \(D_{\mathrm{KL}}(\pi_\theta \| q_A)\)
+on that support (`loss_mode=reverse_kl_topk`, `use_policy_gradient=False`).
+The text teacher sees the question with VL image pads stripped and no pixels
+(proxy for the paper's \(\tilde{x}\); we do not rewrite `[IMAGE DESCRIPTION]`
+unless the parquet already has \(d\)).
 
 ```bash
-bash experiments/mopd/run_lightning.sh mix          # 96 rows, 2 steps
+bash experiments/mopd/run_lightning.sh paper        # 96 rows, 2 steps
 # or:
-HOPD_MIX=1 MOPD_MAX_ROWS=96 STEPS=2 bash experiments/mopd/run_ls6.sh
+HOPD_PAPER=1 MOPD_MAX_ROWS=96 STEPS=2 bash experiments/mopd/run_ls6.sh
 ```
 
-Rollouts gain `alpha_vl` (1 = VL teacher won that sample). Task accuracy in the
-loss is still off unless `HOPD_TASK_REWARD=1` **and** `actor_rollout_ref.rollout.n>=4`
-(GRPO groups). Do not flip that on a `n=1` run.
+`HOPD_MIX=1` is the older approximation: same dual scoring, but only \(p(y_t)\)
+is mixed and the update is k1 + PPO. Do not stack paper reverse KL with
+`HOPD_TASK_REWARD` / outcome GRPO in one job.
+
+Still not paper *scale*: we use 20k/2048/512/bs8 on 3×L40S, not 55k/12384/128
+on 8×B200. `acc` is always logged; it is not in the paper loss.
+
+Rollouts gain `alpha_vl` (1 = VL teacher won that sample) and `omega_k` (union
+support size) on the paper path.
 
 ## Lonestar6
 
