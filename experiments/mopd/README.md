@@ -11,9 +11,12 @@ Even rows → VL teacher (images kept). Odd rows → text teacher (images cleare
 Smoke uses the **real** `mmfine_reason_sampled_55k_text_prompt.parquet`, first **96** rows (half VL, half text), 2 trainer steps. Full uses all rows for 1 epoch.
 
 `max_prompt_length` is 2048 because image tokens inflate VL prompts far past their
-text length, and `filter_overlong_prompts=True` must stay on — it measures the
+text length, and `filter_overlong_prompts=True` stays on — it measures the
 processed length and drops rows that would otherwise break `DataProto.concat`.
-That filtering is why the smoke slices more rows than 2 steps consume.
+The first pass writes an index cache under `~/.cache/verl/rlhf/overlong_filter/`;
+later launches skip the tokenize. `HOPD_REFILTER=1` rebuilds. That filtering is
+why the smoke slices more rows than 2 steps consume. `make_routed_parquet.py`
+also skips when its `.stamp.json` still matches (`MOPD_REBUILD=1` to force).
 
 A full-resolution image alone blows that budget, so `make_routed_parquet.py`
 writes `max_pixels`/`min_pixels` into every image struct (`--image_max_pixels`,

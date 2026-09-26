@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -102,6 +104,28 @@ def main() -> None:
     args = p.parse_args()
     src = Path(args.src)
     out = Path(args.out)
+    stamp_path = out.with_name(out.name + ".stamp.json")
+    src_st = src.stat()
+    stamp = {
+        "src": str(src.resolve()),
+        "src_mtime_ns": src_st.st_mtime_ns,
+        "src_size": src_st.st_size,
+        "max_rows": int(args.max_rows),
+        "image_max_pixels": int(args.image_max_pixels),
+        "image_min_pixels": int(args.image_min_pixels),
+        "keep_all_images": bool(args.keep_all_images),
+    }
+    if (
+        os.environ.get("MOPD_REBUILD", "0") != "1"
+        and out.is_file()
+        and stamp_path.is_file()
+    ):
+        try:
+            if json.loads(stamp_path.read_text()) == stamp:
+                print(f"reuse {out} (inputs unchanged; MOPD_REBUILD=1 to force)")
+                return
+        except (OSError, json.JSONDecodeError):
+            pass
     df = pd.read_parquet(src)
     if df.empty:
         raise SystemExit(f"empty parquet: {src}")
@@ -126,6 +150,7 @@ def main() -> None:
             print(f"image struct fields out: {sorted(first[0])} max_pixels={args.image_max_pixels}")
     out.parent.mkdir(parents=True, exist_ok=True)
     _write_parquet(df, out)
+    stamp_path.write_text(json.dumps(stamp, indent=2) + "\n")
     n_vl = (df["data_source"] == "hopd_vl").sum()
     n_text = (df["data_source"] == "hopd_text").sum()
     print(f"Wrote {out} n={n} vl={n_vl} text={n_text}")

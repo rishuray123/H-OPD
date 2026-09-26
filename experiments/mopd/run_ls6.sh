@@ -105,6 +105,7 @@ fi
 python "$HOPD_HOME/experiments/mopd/make_routed_parquet.py" --src "$SRC" --out "$MOPD_TRAIN" \
     --max_rows "$MAX_ROWS" --image_max_pixels "${MOPD_IMAGE_MAX_PIXELS:-262144}" \
     ${KEEP_IMG_ARGS[@]+"${KEEP_IMG_ARGS[@]}"}
+ORIG_TRAIN="$MOPD_TRAIN"
 VAL_FILE="$MOPD_TRAIN"
 if [[ "${MOPD_FULL:-0}" == "1" ]]; then
     _val="$(find "$HOPD_DATA_ROOT" -name 'mathvista_200_test.parquet' | head -1 || true)"
@@ -129,8 +130,9 @@ TRAIN_BSZ="${TRAIN_BSZ:-8}"
 PPO_MICRO_BSZ=1
 # Image tokens inflate a VL prompt well past the text length, so 512 drops or
 # mismatches most rows. filter_overlong_prompts measures the processed length
-# (images expanded) and must stay True: without it an overlong prompt reaches
-# the agent loop and DataProto.concat fails on mismatched prompt tensors.
+# (images expanded). The first pass writes an index cache; later launches skip
+# the tokenize. HOPD_REFILTER=1 forces a rebuild. Leave the flag True so a
+# stale cache cannot send an overlong prompt into DataProto.concat.
 MAX_PROMPT="${MAX_PROMPT:-2048}"
 # Empty means "not set" so the paper block can pick 256.
 _MAX_RESPONSE_SET="${MAX_RESPONSE+x}"
@@ -264,6 +266,18 @@ python3 -c "import verl.trainer.main_ppo" || {
     echo "       python3 $HOPD_HOME/experiments/mopd/doctor.py" >&2
     exit 1
 }
+
+FILTER_PARQUETS=("$ORIG_TRAIN")
+if [[ "$VAL_FILE" != "$ORIG_TRAIN" ]]; then
+    FILTER_PARQUETS+=("$VAL_FILE")
+fi
+echo "Warming overlong-prompt cache (skipped when the parquet/length/model match)"
+python3 "$HOPD_HOME/experiments/mopd/filter_overlong.py" \
+    --model "$STUDENT_MODEL" \
+    --max_prompt "$MAX_PROMPT" \
+    --image_patch_size 16 \
+    --workers "${FILTER_WORKERS:-4}" \
+    --parquet "${FILTER_PARQUETS[@]}"
 
 unset RAY_ADDRESS ip_head || true
 if [[ -n "${SLURM_JOB_NODELIST:-}" ]]; then
