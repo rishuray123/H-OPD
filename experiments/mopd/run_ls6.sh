@@ -135,13 +135,16 @@ MAX_PROMPT="${MAX_PROMPT:-2048}"
 MAX_RESPONSE="${MAX_RESPONSE:-512}"
 FILTER_OVERLONG=True
 TRUNCATION=error
-SAVE_FREQ=-1
+# Honor SAVE_FREQ if already set (slice runs used to force -1).
+SAVE_FREQ="${SAVE_FREQ:--1}"
 # Smoke: val off. Full: every 50 steps. Must not pre-assign TEST_FREQ=-1
 # or the full-run default below never applies.
 EPOCHS=1
 STEP_ARGS=()
 if [[ "${MOPD_FULL:-0}" == "1" ]]; then
-    SAVE_FREQ="${SAVE_FREQ_FULL:-50}"
+    if [[ "$SAVE_FREQ" == "-1" ]]; then
+        SAVE_FREQ="${SAVE_FREQ_FULL:-50}"
+    fi
     TEST_FREQ="${TEST_FREQ:-${TEST_FREQ_FULL:-50}}"
     EPOCHS="${EPOCHS:-1}"
     RUN_TAG="full"
@@ -187,6 +190,18 @@ if [[ "${HOPD_PAPER:-0}" == "1" ]]; then
     RUN_TAG="${RUN_TAG}-paper"
     echo "HOPD_PAPER=1: union Ω_t mix, reverse KL, supervised (no PPO, no task reward)"
 fi
+# Student vLLM is colocated with FSDP+Adam on GPU 0. Paper reverse KL
+# keeps full-vocab logits; 0.70 util OOM'd Adam on step 2 of the 20k run.
+if [[ -z "${STUDENT_GPU_UTIL:-}" ]]; then
+    if [[ "${HOPD_PAPER:-0}" == "1" ]]; then
+        STUDENT_GPU_UTIL=0.40
+    else
+        STUDENT_GPU_UTIL=0.70
+    fi
+fi
+TEACHER_GPU_UTIL="${TEACHER_GPU_UTIL:-0.70}"
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-$TRAIN_BSZ}"
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 SAVE_DIR="${SAVE_DIR:-$HOPD_CKPT_ROOT/hopd-mopd-${RUN_TAG}-${SLURM_JOB_ID:-local}}"
 RUN_LOG_DIR="$HOPD_LOG_DIR/mopd_${SLURM_JOB_ID:-$(date +%Y%m%d_%H%M%S)}"
 mkdir -p "$RUN_LOG_DIR" "$SAVE_DIR" "$RUN_LOG_DIR/rollouts" "$RUN_LOG_DIR/val"
@@ -296,7 +311,8 @@ python3 -m verl.trainer.main_ppo \
     \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.70 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=$STUDENT_GPU_UTIL \
+    actor_rollout_ref.rollout.max_num_seqs=$MAX_NUM_SEQS \
     actor_rollout_ref.rollout.enforce_eager=True \
     actor_rollout_ref.rollout.free_cache_engine=True \
     actor_rollout_ref.rollout.max_model_len=$MAX_NUM_TOKENS \
@@ -313,7 +329,7 @@ python3 -m verl.trainer.main_ppo \
     +distillation.teacher_models.vl.num_replicas=1 \
     +distillation.teacher_models.vl.inference.name=vllm \
     +distillation.teacher_models.vl.inference.tensor_model_parallel_size=1 \
-    +distillation.teacher_models.vl.inference.gpu_memory_utilization=0.70 \
+    +distillation.teacher_models.vl.inference.gpu_memory_utilization=$TEACHER_GPU_UTIL \
     +distillation.teacher_models.vl.inference.enforce_eager=True \
     +distillation.teacher_models.vl.inference.max_model_len=$MAX_NUM_TOKENS \
     +distillation.teacher_models.text.key=hopd_text \
@@ -321,7 +337,7 @@ python3 -m verl.trainer.main_ppo \
     +distillation.teacher_models.text.num_replicas=1 \
     +distillation.teacher_models.text.inference.name=vllm \
     +distillation.teacher_models.text.inference.tensor_model_parallel_size=1 \
-    +distillation.teacher_models.text.inference.gpu_memory_utilization=0.70 \
+    +distillation.teacher_models.text.inference.gpu_memory_utilization=$TEACHER_GPU_UTIL \
     +distillation.teacher_models.text.inference.enforce_eager=True \
     +distillation.teacher_models.text.inference.max_model_len=$MAX_NUM_TOKENS \
     distillation.distillation_loss.loss_mode=$LOSS_MODE \
