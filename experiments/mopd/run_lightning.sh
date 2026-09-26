@@ -3,7 +3,8 @@
 #   bash experiments/mopd/run_lightning.sh smoke   # routed MOPD, 96 rows, 2 steps
 #   bash experiments/mopd/run_lightning.sh full    # all 55k, 1 epoch
 #   bash experiments/mopd/run_lightning.sh mix     # both teachers, p(y_t) mix + k1
-#   bash experiments/mopd/run_lightning.sh paper   # paper H-OPD: union Ω_t + reverse KL
+#   bash experiments/mopd/run_lightning.sh paper   # paper H-OPD: 96 rows, 2 steps
+#   bash experiments/mopd/run_lightning.sh paper20k # paper H-OPD: 20k rows, 200 steps
 set -euo pipefail
 
 MODE="${1:-smoke}"
@@ -60,8 +61,17 @@ case "$MODE" in
         export HOPD_PAPER=1
         echo "PAPER smoke: union Ω_t mix, reverse KL, no PPO, ${MOPD_MAX_ROWS} rows, STEPS=${STEPS}"
         ;;
+    paper20k)
+        export MOPD_MAX_ROWS="${MOPD_MAX_ROWS:-20000}"
+        export STEPS="${STEPS:-200}"
+        export SAVE_FREQ="${SAVE_FREQ:-50}"
+        export TEST_FREQ="${TEST_FREQ:-50}"
+        export MOPD_FULL=0
+        export HOPD_PAPER=1
+        echo "PAPER 20k: union Ω_t mix, reverse KL, no PPO, ${MOPD_MAX_ROWS} rows, STEPS=${STEPS}, ckpt/val every ${SAVE_FREQ}/${TEST_FREQ}"
+        ;;
     *)
-        echo "Usage: $0 smoke|full|mix|paper" >&2
+        echo "Usage: $0 smoke|full|mix|paper|paper20k" >&2
         exit 1
         ;;
 esac

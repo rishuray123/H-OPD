@@ -152,6 +152,14 @@ if [[ "${MOPD_FULL:-0}" == "1" ]]; then
     TEST_FREQ="${TEST_FREQ:-${TEST_FREQ_FULL:-50}}"
     EPOCHS="${EPOCHS:-1}"
     RUN_TAG="full"
+elif [[ "${MAX_ROWS:-0}" -ge 1000 ]]; then
+    if [[ "$SAVE_FREQ" == "-1" ]]; then
+        SAVE_FREQ=50
+    fi
+    TEST_FREQ="${TEST_FREQ:-50}"
+    STEPS="${STEPS:-200}"
+    STEP_ARGS=(+trainer.total_training_steps="$STEPS")
+    RUN_TAG="smoke${MAX_ROWS}"
 elif [[ "${MAX_ROWS:-0}" -gt 0 ]]; then
     TEST_FREQ="${TEST_FREQ:--1}"
     STEPS="${STEPS:-2}"

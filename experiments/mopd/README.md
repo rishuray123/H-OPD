@@ -67,7 +67,8 @@ cd ~/H-OPD
 source "$HOPD_VENV/bin/activate"
 bash experiments/mopd/run_lightning.sh smoke   # wait for Done.
 bash experiments/mopd/run_lightning.sh mix     # both teachers, p(y_t) mix + k1
-bash experiments/mopd/run_lightning.sh paper   # paper H-OPD: union Ω_t + reverse KL
+bash experiments/mopd/run_lightning.sh paper   # paper H-OPD: 96 rows, 2 steps
+bash experiments/mopd/run_lightning.sh paper20k # paper H-OPD: 20k rows, 200 steps
 bash experiments/mopd/run_lightning.sh full
 ```
 
