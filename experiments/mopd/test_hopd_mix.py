@@ -63,6 +63,25 @@ def test_reverse_kl_peaked_vs_flat() -> None:
     assert kl_flat > kl_peak
 
 
+def test_paper_text_prompt_messages() -> None:
+    from paper_prompts import IMAGE_DESCRIPTION_MARK, messages_from_text_prompt, text_prompt_has_description
+
+    raw = [
+        {
+            "role": "user",
+            "content": f"What is x? {IMAGE_DESCRIPTION_MARK}A triangle with a right angle.",
+        }
+    ]
+    msgs = messages_from_text_prompt(raw)
+    assert msgs and msgs[0]["role"] == "user"
+    assert IMAGE_DESCRIPTION_MARK in msgs[0]["content"]
+    assert "<image>" not in msgs[0]["content"]
+    assert text_prompt_has_description(raw)
+    stripped = messages_from_text_prompt([{"role": "user", "content": "What is x?<image>"}])
+    assert stripped and "<image>" not in stripped[0]["content"]
+    assert not text_prompt_has_description(stripped)
+
+
 def test_text_prompt_strip_keeps_response() -> None:
     vision = 151655
     prompt = [1, vision, vision, 2]
@@ -71,6 +90,12 @@ def test_text_prompt_strip_keeps_response() -> None:
     text_seq = stripped + response
     assert text_seq[-3:] == response
     assert vision not in text_seq
+    # Paper tilde-x ids replace the VL prompt; student response stays aligned.
+    seq = [1, vision, 2, 9, 8]
+    text_prompt_ids = [4, 5, 6]
+    prompt_len = 3
+    text_seq = text_prompt_ids + seq[prompt_len:]
+    assert text_seq == [4, 5, 6, 9, 8]
 
 
 def test_equal_entropy_half() -> None:
@@ -133,8 +158,13 @@ def _run_torch_tests() -> bool:
 
 
 if __name__ == "__main__":
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
     test_low_entropy_vl_wins()
     test_equal_entropy_half()
+    test_paper_text_prompt_messages()
     test_text_prompt_strip_keeps_response()
     test_union_mix_disjoint()
     test_reverse_kl_peaked_vs_flat()

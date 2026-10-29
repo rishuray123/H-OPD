@@ -2,7 +2,9 @@
 
 Default: veRL assigns **one** teacher per sample via `data_source` (routed MOPD).
 `HOPD_PAPER=1` is the paper recipe: both teachers on the same \(Y\), mix on
-\(\Omega_t = K_V \cup K_T\), reverse KL \(D_{\mathrm{KL}}(\pi_\theta \| q_A)\).
+\(\Omega_t = K_V \cup K_T\), reverse KL \(D_{\mathrm{KL}}(\pi_\theta \| q^\star)\),
+text teacher on the parquet `text_prompt` (\(\tilde{x}\) with `[IMAGE DESCRIPTION]`),
+held-out **MathVista-200** `acc`.
 
 GPU split: student 2B on **1** GPU, VL 4B teacher on **1**, text `Qwen3-4B-Instruct-2507` on **1**. A 1×H100 dump machine cannot run this.
 
@@ -67,8 +69,11 @@ cd ~/H-OPD
 source "$HOPD_VENV/bin/activate"
 bash experiments/mopd/run_lightning.sh smoke   # wait for Done.
 bash experiments/mopd/run_lightning.sh mix     # both teachers, p(y_t) mix + k1
-bash experiments/mopd/run_lightning.sh paper   # paper H-OPD: 96 rows, 2 steps
-bash experiments/mopd/run_lightning.sh paper20k # paper H-OPD: 20k rows, 200 steps
+bash experiments/mopd/run_lightning.sh papersmoke # paper recipe, 96 rows, 2 steps, no val
+bash experiments/mopd/run_lightning.sh paperdev   # -dev: 96 rows, 4 steps, MathVista-32
+bash experiments/mopd/run_lightning.sh paper      # paper confirm: 256 rows, 20 steps, MathVista acc
+bash experiments/mopd/run_lightning.sh paper2k    # 2048 rows, 80 steps
+bash experiments/mopd/run_lightning.sh paper20k   # 20k rows, 200 steps
 bash experiments/mopd/run_lightning.sh full
 ```
 
@@ -106,24 +111,45 @@ generations.
 This is the paper recipe on this stack. Both teachers score the same student
 \(Y\). Each is renormalized on its own top-\(k\), then mixed on
 \(\Omega_t = K_V \cup K_T\) with entropy weights \(\alpha \propto \exp(-H/\tau)\).
-The student is trained with reverse KL \(D_{\mathrm{KL}}(\pi_\theta \| q_A)\)
+The student is trained with reverse KL \(D_{\mathrm{KL}}(\pi_\theta \| q^\star)\)
 on that support (`loss_mode=reverse_kl_topk`, `use_policy_gradient=False`).
-The text teacher sees the question with VL image pads stripped and no pixels
-(proxy for the paper's \(\tilde{x}\); we do not rewrite `[IMAGE DESCRIPTION]`
-unless the parquet already has \(d\)).
+The 55k file already stores paper \(\tilde{x}\) in a top-level `text_prompt`
+column (`question [IMAGE DESCRIPTION] <d>`). Student and VL teacher keep
+`prompt` + image. The text teacher is scored on tokenized `text_prompt` (no
+pixels). Mix jobs fail if that column is missing. Held-out acc is
+`mathvista_200_test.parquet` (cleaned into `mopd/mathvista_200_eval.parquet`).
+`watch.py` prints `acc` (train rollouts) and `val_acc` (MathVista). `tilde_x=1`
+means the description path was used.
 
 ```bash
-bash experiments/mopd/run_lightning.sh paper        # 96 rows, 2 steps
-# or:
-HOPD_PAPER=1 MOPD_MAX_ROWS=96 STEPS=2 bash experiments/mopd/run_ls6.sh
+# LS6 login. Cancel other GPU jobs first (-dev is 1 job/user; extra sbatch hurts Priority).
+cd $SCRATCH/hopd/H-OPD && mkdir -p logs
+squeue -u rkr758
+scancel 3540105 3540127   # hopd-pap + hopd-mop if still PD
+
+# 1) debug on gpu-a100-dev (2h). Same paper recipe; 96 rows, 4 steps, 32 MathVista val.
+#    --exclude=c301-002: that -dev node is 2×A100. Command-line -t overrides the 12h header.
+HOPD_PAPER=1 MOPD_MAX_ROWS=96 STEPS=4 TEST_FREQ=4 VAL_MAX_ROWS=32 SAVE_FREQ=-1 \
+  sbatch -p gpu-a100-dev --exclude=c301-002 -t 02:00:00 --job-name=hopd-pdev \
+  experiments/mopd/run_ls6.sh
+
+# After idev (if you use it instead of sbatch): nvidia-smi -L must print 3 lines, then
+#   bash experiments/mopd/run_lightning.sh paperdev
+
+# 2) after -dev shows tilde_x≈1, teacher_mass≈1, and a val_acc number:
+HOPD_PAPER=1 MOPD_MAX_ROWS=2048 STEPS=80 TEST_FREQ=20 SAVE_FREQ=20 \
+  sbatch -p gpu-a100 --exclude=c301-002 --job-name=hopd-p2k \
+  experiments/mopd/run_ls6.sh
 ```
 
 `HOPD_MIX=1` is the older approximation: same dual scoring, but only \(p(y_t)\)
 is mixed and the update is k1 + PPO. Do not stack paper reverse KL with
 `HOPD_TASK_REWARD` / outcome GRPO in one job.
 
-Still not paper *scale*: we use 20k/2048/512/bs8 on 3×L40S, not 55k/12384/128
-on 8×B200. `acc` is always logged; it is not in the paper loss.
+Still not paper *scale*: 256–20k / 2048 / 256 / bs8 on 3×A100, not 55k / 12384 /
+128 on 8×B200, and acc is boxed MathVista-200 rather than VLMEvalKit. `acc` is
+logged only; it is not in the paper loss. First paper job after this change
+rebuilds the mix parquet (`MOPD_REBUILD=1` if a stale stamp is reused).
 
 Rollouts gain `alpha_vl` (1 = VL teacher won that sample) and `omega_k` (union
 support size) on the paper path.

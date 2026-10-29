@@ -97,6 +97,7 @@ def load_rollout_stats(run: str, subdir: str) -> dict[int, dict[str, float]]:
         vl: list[float] = []
         alpha: list[float] = []
         omega: list[float] = []
+        tilde: list[float] = []
         with open(path, errors="replace") as f:
             for line in f:
                 line = line.strip()
@@ -114,8 +115,10 @@ def load_rollout_stats(run: str, subdir: str) -> dict[int, dict[str, float]]:
                     alpha.append(float(rec["alpha_vl"]))
                 if isinstance(rec.get("omega_k"), (int, float)):
                     omega.append(float(rec["omega_k"]))
-        if acc or alpha or omega:
-            stats[step] = {"n": float(max(len(acc), len(alpha), len(omega)))}
+                if isinstance(rec.get("used_text_prompt"), (int, float)):
+                    tilde.append(float(rec["used_text_prompt"]))
+        if acc or alpha or omega or tilde:
+            stats[step] = {"n": float(max(len(acc), len(alpha), len(omega), len(tilde)))}
             if acc:
                 stats[step]["acc"] = sum(acc) / len(acc)
             if vl:
@@ -124,6 +127,8 @@ def load_rollout_stats(run: str, subdir: str) -> dict[int, dict[str, float]]:
                 stats[step]["alpha_vl"] = sum(alpha) / len(alpha)
             if omega:
                 stats[step]["omega_k"] = sum(omega) / len(omega)
+            if tilde:
+                stats[step]["used_text_prompt"] = sum(tilde) / len(tilde)
     return stats
 
 
@@ -172,11 +177,14 @@ def render(run: str, args) -> str:
         return f"run {run}\nno steps logged yet — training is still starting up."
 
     show_alpha = any("alpha_vl" in v for v in train_roll.values())
+    show_tilde = any("used_text_prompt" in v for v in train_roll.values())
     headers = ["step"] + [h for h, _ in cols]
     if train_roll:
         headers += ["acc", "n"]
         if show_alpha:
             headers += ["alpha_vl"]
+        if show_tilde:
+            headers += ["tilde_x"]
     if val_roll:
         headers += ["val_acc"]
 
@@ -190,6 +198,9 @@ def render(run: str, args) -> str:
             if show_alpha:
                 a = r.get("alpha_vl")
                 row += [f"{a:.3f}" if a is not None else "-"]
+            if show_tilde:
+                t = r.get("used_text_prompt")
+                row += [f"{t:.2f}" if t is not None else "-"]
         if val_roll:
             acc = val_roll.get(step, {}).get("acc")
             row += [f"{acc:.3f}" if acc is not None else "-"]
@@ -223,16 +234,18 @@ def write_csv(run: str, path: str, args) -> None:
 
     steps = load_metrics(run)
     roll = load_rollout_stats(run, "rollouts")
+    val = load_rollout_stats(run, "val")
     keys = sorted({k for row in steps.values() for k in row})
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["step"] + keys + ["rollout_acc", "rollout_n"])
+        w.writerow(["step"] + keys + ["rollout_acc", "rollout_n", "val_acc"])
         for step in sorted(steps):
             r = roll.get(step, {})
+            v = val.get(step, {})
             w.writerow(
                 [step]
                 + [steps[step].get(k, "") for k in keys]
-                + [r.get("acc", ""), r.get("n", "")]
+                + [r.get("acc", ""), r.get("n", ""), v.get("acc", "")]
             )
     print(f"wrote {path} ({len(steps)} steps, {len(keys)} metrics)")
 

@@ -5,11 +5,17 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+
+_ROOT = Path(__file__).resolve().parents[2]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+from experiments.mopd.paper_prompts import text_prompt_has_description  # noqa: E402
 
 # HuggingFace `datasets` materializes every Arrow struct field, including
 # nulls. If this schema kept the source `image` field, process_image would
@@ -101,6 +107,16 @@ def main() -> None:
         action="store_true",
         help="Keep images on text-routed rows too (paper H-OPD mix). Default: drop images on odd/text rows.",
     )
+    p.add_argument(
+        "--eval",
+        action="store_true",
+        help="Eval parquet: clean images, keep original data_source, do not even/odd-route.",
+    )
+    p.add_argument(
+        "--require_text_prompt",
+        action="store_true",
+        help="Fail if the source has no paper text_prompt / [IMAGE DESCRIPTION] (H-OPD mix).",
+    )
     args = p.parse_args()
     src = Path(args.src)
     out = Path(args.out)
@@ -114,6 +130,8 @@ def main() -> None:
         "image_max_pixels": int(args.image_max_pixels),
         "image_min_pixels": int(args.image_min_pixels),
         "keep_all_images": bool(args.keep_all_images),
+        "eval": bool(args.eval),
+        "require_text_prompt": bool(args.require_text_prompt),
     }
     if (
         os.environ.get("MOPD_REBUILD", "0") != "1"
@@ -133,14 +151,26 @@ def main() -> None:
         df = df.iloc[: args.max_rows]
     df = df.copy()
     n = len(df)
-    df["data_source"] = ["hopd_vl" if i % 2 == 0 else "hopd_text" for i in range(n)]
+    n_tilde = 0
+    if "text_prompt" in df.columns:
+        n_tilde = int(sum(1 for tp in df["text_prompt"] if text_prompt_has_description(tp)))
+        print(f"paper text_prompt with [IMAGE DESCRIPTION]: {n_tilde}/{n}")
+    elif args.require_text_prompt:
+        raise SystemExit(f"no text_prompt column in {src} (paper mix needs paper tilde-x descriptions)")
+    if args.require_text_prompt and n_tilde == 0:
+        raise SystemExit(f"0/{n} rows have [IMAGE DESCRIPTION] in text_prompt ({src})")
+    if args.eval:
+        print(f"eval mode: keeping original data_source, cleaning images, n={n}")
+    else:
+        df["data_source"] = ["hopd_vl" if i % 2 == 0 else "hopd_text" for i in range(n)]
     if "images" in df.columns:
         first = next((im for im in df["images"] if im is not None and len(im) > 0), None)
         if isinstance(first, (list, tuple)) and isinstance(first[0], dict):
             print(f"image struct fields in: {sorted(first[0])}")
+        drop_text_images = (not args.eval) and (not args.keep_all_images)
         cleaned = [
             None
-            if (ds == "hopd_text" and not args.keep_all_images)
+            if (drop_text_images and ds == "hopd_text")
             else _clean_images(im, args.image_max_pixels, args.image_min_pixels)
             for ds, im in zip(df["data_source"], df["images"])
         ]
@@ -151,12 +181,16 @@ def main() -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     _write_parquet(df, out)
     stamp_path.write_text(json.dumps(stamp, indent=2) + "\n")
-    n_vl = (df["data_source"] == "hopd_vl").sum()
-    n_text = (df["data_source"] == "hopd_text").sum()
-    print(f"Wrote {out} n={n} vl={n_vl} text={n_text}")
+    if args.eval:
+        print(f"Wrote {out} n={n} eval data_source={df['data_source'].nunique() if 'data_source' in df.columns else 0}")
+    else:
+        n_vl = int((df["data_source"] == "hopd_vl").sum())
+        n_text = int((df["data_source"] == "hopd_text").sum())
+        print(f"Wrote {out} n={n} vl={n_vl} text={n_text}")
     if "images" in df.columns:
         kept = sum(1 for im in df["images"] if im is not None and len(im) > 0)
-        print(f"rows carrying images: {kept} (expect {n if args.keep_all_images else n_vl})")
+        expect = n if (args.eval or args.keep_all_images) else int((df["data_source"] == "hopd_vl").sum())
+        print(f"rows carrying images: {kept} (expect {expect})")
 
 
 if __name__ == "__main__":

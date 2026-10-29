@@ -69,6 +69,16 @@ fi
 # shellcheck disable=SC1090
 source "$HOPD_VENV/bin/activate"
 hopd_activate_env || exit 1
+# vLLM workers import numba (numpy<=2.2). A later pip can bump numpy to 2.5
+# and the job dies after occupying a GPU node: Engine core / WorkerProc.
+if ! python -c 'import numpy as n; p=n.__version__.split("."); raise SystemExit(0 if p[0]=="2" and int(p[1])<=2 else 1)'; then
+    echo "numpy is $(python -c 'import numpy; print(numpy.__version__)'); pinning 2.2.6 (numba)"
+    if command -v uv >/dev/null 2>&1; then
+        uv pip install "numpy==2.2.6"
+    else
+        python -m pip install "numpy==2.2.6"
+    fi
+fi
 
 SRC="$(find "$HOPD_DATA_ROOT" -name 'mmfine_reason_sampled_55k_text_prompt.parquet' | head -1 || true)"
 if [[ -z "$SRC" || ! -f "$SRC" ]]; then
@@ -99,18 +109,31 @@ if [[ -z "$ROUTED_TAG" ]]; then
     MOPD_TRAIN="$HOPD_DATA_ROOT/mopd/train_routed.parquet"
 fi
 KEEP_IMG_ARGS=()
+REQUIRE_TXT_ARGS=()
 if [[ "$MIX" == "1" ]]; then
     KEEP_IMG_ARGS=(--keep_all_images)
+    REQUIRE_TXT_ARGS=(--require_text_prompt)
 fi
 python "$HOPD_HOME/experiments/mopd/make_routed_parquet.py" --src "$SRC" --out "$MOPD_TRAIN" \
     --max_rows "$MAX_ROWS" --image_max_pixels "${MOPD_IMAGE_MAX_PIXELS:-262144}" \
-    ${KEEP_IMG_ARGS[@]+"${KEEP_IMG_ARGS[@]}"}
+    ${KEEP_IMG_ARGS[@]+"${KEEP_IMG_ARGS[@]}"} \
+    ${REQUIRE_TXT_ARGS[@]+"${REQUIRE_TXT_ARGS[@]}"}
 ORIG_TRAIN="$MOPD_TRAIN"
+_USER_VAL="${VAL_FILE:-}"
 VAL_FILE="$MOPD_TRAIN"
-if [[ "${MOPD_FULL:-0}" == "1" ]]; then
-    _val="$(find "$HOPD_DATA_ROOT" -name 'mathvista_200_test.parquet' | head -1 || true)"
-    if [[ -n "$_val" && -f "$_val" ]]; then
-        VAL_FILE="$_val"
+# Paper / full: held-out MathVista-200 acc (paper's published val slice).
+if [[ -n "$_USER_VAL" ]]; then
+    VAL_FILE="$_USER_VAL"
+elif [[ "${HOPD_PAPER:-0}" == "1" || "${MOPD_FULL:-0}" == "1" ]]; then
+    _valsrc="$(find "$HOPD_DATA_ROOT" -name 'mathvista_200_test.parquet' | head -1 || true)"
+    if [[ -n "$_valsrc" && -f "$_valsrc" ]]; then
+        _val_tag=""
+        if [[ "${VAL_MAX_ROWS:-0}" -gt 0 ]]; then
+            _val_tag="_${VAL_MAX_ROWS}"
+        fi
+        VAL_FILE="$HOPD_DATA_ROOT/mopd/mathvista_200_eval${_val_tag}.parquet"
+        python "$HOPD_HOME/experiments/mopd/make_routed_parquet.py" --src "$_valsrc" --out "$VAL_FILE" \
+            --eval --max_rows "${VAL_MAX_ROWS:-0}" --image_max_pixels "${MOPD_IMAGE_MAX_PIXELS:-262144}"
     fi
 fi
 
@@ -141,8 +164,7 @@ FILTER_OVERLONG=True
 TRUNCATION=error
 # Honor SAVE_FREQ if already set (slice runs used to force -1).
 SAVE_FREQ="${SAVE_FREQ:--1}"
-# Smoke: val off. Full: every 50 steps. Must not pre-assign TEST_FREQ=-1
-# or the full-run default below never applies.
+# Smoke: val off unless HOPD_PAPER and TEST_FREQ is set. Full/paper: MathVista acc.
 EPOCHS=1
 STEP_ARGS=()
 if [[ "${MOPD_FULL:-0}" == "1" ]]; then
@@ -171,6 +193,13 @@ else
     STEP_ARGS=(+trainer.total_training_steps="$STEPS")
     RUN_TAG="steps${STEPS}"
 fi
+if [[ -z "${VAL_BEFORE_TRAIN:-}" ]]; then
+    if [[ "${HOPD_PAPER:-0}" == "1" && "$TEST_FREQ" != "-1" ]]; then
+        VAL_BEFORE_TRAIN=True
+    else
+        VAL_BEFORE_TRAIN=False
+    fi
+fi
 LR=1e-6
 LOSS_MODE="k1"
 TOPK=8
@@ -189,6 +218,7 @@ fi
 GPUS_ON_NODE=$((STUDENT_GPUS + TEACHER_GPUS))
 if [[ "$NGPU" -gt 0 && "$GPUS_ON_NODE" -gt "$NGPU" ]]; then
     echo "ERROR: need $GPUS_ON_NODE GPUs (student $STUDENT_GPUS + teachers $TEACHER_GPUS), found $NGPU" >&2
+    echo "       gpu-a100-dev node c301-002 is 2×A100 — exit and retry, or sbatch --exclude=c301-002" >&2
     exit 1
 fi
 echo "GPUs: student=$STUDENT_GPUS teacher=$TEACHER_GPUS (ray --num-gpus=$GPUS_ON_NODE)"
@@ -232,7 +262,9 @@ if [[ "${HOPD_PAPER:-0}" == "1" ]]; then
     fi
     USE_TORCH_COMPILE="${USE_TORCH_COMPILE:-False}"
     echo "HOPD_PAPER=1: union Ω_t mix, reverse KL, supervised (no PPO, no task reward)"
+    echo "HOPD_PAPER=1: text teacher uses parquet text_prompt ([IMAGE DESCRIPTION])"
     echo "HOPD_PAPER=1: MAX_RESPONSE=$MAX_RESPONSE use_torch_compile=$USE_TORCH_COMPILE"
+    echo "HOPD_PAPER=1: val=$VAL_FILE TEST_FREQ=$TEST_FREQ val_before_train=$VAL_BEFORE_TRAIN"
 fi
 USE_TORCH_COMPILE="${USE_TORCH_COMPILE:-True}"
 # Student vLLM is colocated with FSDP+Adam on GPU 0. Paper reverse KL
@@ -268,10 +300,26 @@ cleanup() {
 }
 trap cleanup SIGINT SIGTERM EXIT
 
+# Nested veRL is gitignored; paper text_prompt scoring lives in this overlay so
+# `git pull` on H-OPD is enough. Do this before bootstrap_verl.sh would clobber it.
+_OVERLAY="$HOPD_HOME/experiments/mopd/verl_overlay"
+if [[ -d "$_OVERLAY/verl" && -d "$HOPD_HOME/verl/verl" ]]; then
+    echo "Applying paper text_prompt overlay onto nested veRL"
+    cp "$_OVERLAY/verl/experimental/teacher_loop/teacher_manager.py" \
+        "$HOPD_HOME/verl/verl/experimental/teacher_loop/teacher_manager.py"
+    cp "$_OVERLAY/verl/experimental/agent_loop/agent_loop.py" \
+        "$HOPD_HOME/verl/verl/experimental/agent_loop/agent_loop.py"
+fi
+
 echo "Checking trainer imports before touching GPUs"
 python3 -c "import verl.trainer.main_ppo" || {
     echo "ERROR: verl.trainer.main_ppo does not import in $HOPD_VENV" >&2
     echo "       python3 $HOPD_HOME/experiments/mopd/doctor.py" >&2
+    exit 1
+}
+python3 -c "from verl.experimental.teacher_loop.teacher_manager import tokenize_text_teacher_prompt" || {
+    echo "ERROR: nested veRL is missing paper text_prompt scoring (overlay did not apply)." >&2
+    echo "       bash setup/bootstrap_verl.sh then rerun; overlay is copied at job start." >&2
     exit 1
 }
 
@@ -417,7 +465,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.n_gpus_per_node=$STUDENT_GPUS \
     trainer.resume_mode=disable \
     trainer.default_local_dir=$SAVE_DIR \
-    trainer.val_before_train=False \
+    trainer.val_before_train=$VAL_BEFORE_TRAIN \
     trainer.total_epochs=$EPOCHS \
     trainer.save_freq=$SAVE_FREQ \
     trainer.test_freq=$TEST_FREQ \

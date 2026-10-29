@@ -70,6 +70,36 @@ def test_tiny() -> None:
         names = pq.read_schema(dst).field("images").type.value_type.names
         assert "image" not in names, names
         print(r.stdout.strip())
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "src.parquet"
+        dst = Path(td) / "eval.parquet"
+        df = pd.DataFrame(
+            {
+                "prompt": ["q1"],
+                "data_source": ["jinzhuoran/MathVista-200"],
+                "images": [list(raw)],
+                "text_prompt": [[{"role": "user", "content": "q1 [IMAGE DESCRIPTION]a triangle"}]],
+            }
+        )
+        df.to_parquet(src, index=False)
+        subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "experiments/mopd/make_routed_parquet.py"),
+                "--src",
+                str(src),
+                "--out",
+                str(dst),
+                "--eval",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        got = pd.read_parquet(dst)
+        assert list(got["data_source"]) == ["jinzhuoran/MathVista-200"]
+        assert got.loc[0, "images"][0]["bytes"] == raw[0]["bytes"]
+        assert "text_prompt" in got.columns
     print("[ ok ] mopd parquet routing (VL keeps a capped image, text drops it)")
 
 

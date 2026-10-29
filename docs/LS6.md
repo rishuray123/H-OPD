@@ -20,9 +20,15 @@ Venvs and checkpoints on `$SCRATCH`, never `$WORK`.
 
 ## Queues
 
-- `gpu-a100-dev`: 3× A100-40GB, max **2 hours**, **1 job per user**. Often sits in queue.
+- `gpu-a100-dev`: usually 3× A100-40GB, max **2 hours**, **1 job per user**. Often sits in queue.
 - `gpu-a100`: same node type, up to 48 hours, more jobs allowed. Prefer this if `idev` on `-dev` hangs.
 - Do **not** use `gpu-a100-small` (virtual slice, not a full 3-GPU node). Do not use `gpu-h100` with this cu128 / vLLM 0.12 pin.
+- Before launching mix/paper (needs 3 GPUs), run `nvidia-smi -L`. `c301-002` on `gpu-a100-dev` (2026-10-27) had only **2× A100-PCIE-40GB** (`CUDA_VISIBLE_DEVICES` empty, `GRES` empty). `idev` does **not** take `--gres` (that error-parses the time as an option). Use `-m` for minutes, then skip 2-GPU nodes:
+
+```bash
+idev -p gpu-a100-dev -A ECS26006 -N 1 -n 1 -m 60
+nvidia-smi -L   # need 3 lines; if 2, exit and idev again
+```
 
 ```bash
 # cancel a stuck -dev wait (Ctrl-C), then:
@@ -81,3 +87,12 @@ bash $HOPD_HOME/setup/bootstrap_verl.sh   # fetch+checkout origin/hopd
 - 2026-09-27: `TRAIN_BSZ=4` dies before step 1: `AssertionError: only support equal chunk. Got size of DataProto 4 and chunk 8` because `rollout.agent.num_workers` defaults to 8. `run_ls6.sh` now sets `num_workers` to 8 when the batch divides 8, else to `TRAIN_BSZ`. On 4 visible GPUs the student is 2-way FSDP + vLLM TP=2; teachers stay 1+1. Keep `TRAIN_BSZ=8` on 4 GPUs. After `git pull`, rerun without `TRAIN_BSZ=4`.
 - 2026-09-27: Overlong-prompt filtering tokenizes every VL row on each launch. veRL `hopd` now caches kept indices under `~/.cache/verl/rlhf/overlong_filter/` (keyed by parquet mtime/size, `max_prompt_length`, model, patch size). `run_ls6.sh` warms that cache on CPU before Ray. `make_routed_parquet.py` skips when `.stamp.json` still matches. First run after `bootstrap_verl.sh` still tokenizes once; later launches print `filter dataset cache hit`. `HOPD_REFILTER=1` / `MOPD_REBUILD=1` force a rebuild.
 - 2026-09-27: `bash experiments/mopd/run_lightning.sh paper20k` is the 20k paper job: 20000-row mix, 200 steps, `TRAIN_BSZ=8`, ckpt/val every 50. Do not set `TRAIN_BSZ=4`. On 4 GPUs the student is 2-way FSDP. First 20k launch after the filter-cache patch still tokenizes once.
+- 2026-10-27: `idev -p gpu-a100-dev` landed on `c301-002` with only **2× A100-PCIE-40GB**. Paper mix needs 3. `idev` rejects `--gres=gpu:3` (`"01:00:00" is not a valid option`). Use `idev -p gpu-a100-dev -A ECS26006 -N 1 -n 1 -m 60`, then `nvidia-smi -L`; if 2 GPUs, exit and retry.
+- 2026-10-27: A second `idev -p gpu-a100-dev -m 60` immediately re-landed on **`c301-002`** (2 GPUs). The -dev idle node is the lame duck. Do not retry -dev; use `gpu-a100` or `sbatch --exclude=c301-002` from a login node.
+- 2026-10-27: Paper smoke `sbatch` job **3535648** (`gpu-a100`, 3 GPUs) died before step 1: `WorkerProc failed to start` → `ImportError: Numba needs NumPy 2.2 or less. Got NumPy 2.5`. Pin `$SCRATCH/hopd/.venv` with `uv pip install numpy==2.2.6` (login node, no GPU) before the next `sbatch`. Do not `idev -p gpu-a100-dev` (lands on 2-GPU `c301-002`); do not stack extra `idev` while a paper job is pending (Priority). `run_ls6.sh` now re-pins numpy if it drifted.
+- 2026-10-29: Paper 55k parquet already has \(\tilde{x}\) as top-level `text_prompt` (`[IMAGE DESCRIPTION]`). Mix copies that onto the nested veRL text teacher (student/VL still use `prompt`+image). Paper jobs val on cleaned MathVista-200. Confirm then larger, from a **login** node, numpy **2.2.6**, `--exclude=c301-002`: `HOPD_PAPER=1 MOPD_MAX_ROWS=256 STEPS=20 TEST_FREQ=5 SAVE_FREQ=10 sbatch -p gpu-a100 --exclude=c301-002 experiments/mopd/run_ls6.sh` then `MOPD_MAX_ROWS=2048 STEPS=80 TEST_FREQ=20`. Nested `verl/` must have `tokenize_text_teacher_prompt` (`run_ls6.sh` copies `experiments/mopd/verl_overlay/` into it). `bootstrap_verl.sh` after that copy will wipe the overlay unless `origin/hopd` is updated.
+- 2026-10-29: Paper confirm `sbatch` job **3540127** (`gpu-a100`, `--exclude=c301-002`, `HOPD_PAPER=1 MOPD_MAX_ROWS=256 STEPS=20 TEST_FREQ=5 SAVE_FREQ=10`). Local description/MathVista patches were not pushed yet — TACC only has them if that checkout was copied.
+- 2026-10-30: Job **3540127** still `PD (Priority)` ~12h after submit (`TIME 0:00`). Not started; `gpu-a100` wait. Do not stack extra `idev`/sbatch while it sits.
+- 2026-10-30: `squeue -p gpu-a100` showed a deep backlog (many `Priority` PDs; running jobs already at 1–2 days). Same user also had **3540105** `hopd-pap` pending next to **3540127** `hopd-mop` — two GPU jobs from `rkr758` both `Priority`. Keep one; `scancel` the other.
+- 2026-10-30: Debug paper recipe on **`gpu-a100-dev`** (2h, 1 job/user, `--exclude=c301-002`, `-t 02:00:00`) then larger `gpu-a100`. Dev: `HOPD_PAPER=1 MOPD_MAX_ROWS=96 STEPS=4 TEST_FREQ=4 VAL_MAX_ROWS=32`. Cancel 3540105/3540127 first. `run_lightning.sh paperdev` after an `idev` that shows 3 GPUs.
+- 2026-10-30: Job **3541088** `hopd-pdev` submitted to `gpu-a100-dev` after scancel of 3540105/3540127. `grep VAL_MAX_ROWS|paperdev|tokenize_text_teacher_prompt` on TACC was **empty** — cluster clone does not have the description/MathVista patches. That job will run old `HOPD_PAPER=1` (pad-strip text teacher, val=train). Sync files then resubmit.

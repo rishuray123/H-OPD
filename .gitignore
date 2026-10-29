@@ -6,7 +6,7 @@ scratch/
 __pycache__/
 *.pyc
 .venv/
-verl/
+/verl/
 *.safetensors
 *.parquet
 *.pt
