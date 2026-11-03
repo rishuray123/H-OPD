@@ -17,6 +17,17 @@
 
 set -euo pipefail
 export PATH="$HOME/.local/bin:$PATH"
+# Unbuffered trainer output + wall-clock prefix on every line, so the .out shows
+# where startup time goes (imports / filter / Ray / each vLLM engine / step 1).
+export PYTHONUNBUFFERED=1
+hopd_ts() {
+    if [[ $# -gt 0 ]]; then
+        echo "[$(date +%H:%M:%S)] $*"
+    else
+        while IFS= read -r _l; do printf '[%s] %s\n' "$(date +%H:%M:%S)" "$_l"; done
+    fi
+}
+hopd_ts "=== run_ls6.sh start (job ${SLURM_JOB_ID:-local}, host $(hostname))"
 
 # Lonestar sets $SCRATCH; Lightning / local does not. Do not expand $SCRATCH
 # under set -u unless it exists.
@@ -118,6 +129,7 @@ if [[ "$MIX" == "1" ]]; then
     KEEP_IMG_ARGS=(--keep_all_images)
     REQUIRE_TXT_ARGS=(--require_text_prompt)
 fi
+hopd_ts "=== building train/val parquets"
 python "$HOPD_HOME/experiments/mopd/make_routed_parquet.py" --src "$SRC" --out "$MOPD_TRAIN" \
     --max_rows "$MAX_ROWS" --image_max_pixels "${MOPD_IMAGE_MAX_PIXELS:-262144}" \
     ${KEEP_IMG_ARGS[@]+"${KEEP_IMG_ARGS[@]}"} \
@@ -358,7 +370,7 @@ trap cleanup SIGINT SIGTERM EXIT
 # `git pull` on H-OPD is enough. Do this before bootstrap_verl.sh would clobber it.
 _OVERLAY="$HOPD_HOME/experiments/mopd/verl_overlay"
 if [[ -d "$_OVERLAY/verl" && -d "$HOPD_HOME/verl/verl" ]]; then
-    echo "Applying paper text_prompt overlay onto nested veRL"
+    hopd_ts "=== applying paper overlay onto nested veRL"
     cp "$_OVERLAY/verl/experimental/teacher_loop/teacher_manager.py" \
         "$HOPD_HOME/verl/verl/experimental/teacher_loop/teacher_manager.py"
     cp "$_OVERLAY/verl/experimental/agent_loop/agent_loop.py" \
@@ -367,7 +379,7 @@ if [[ -d "$_OVERLAY/verl" && -d "$HOPD_HOME/verl/verl" ]]; then
         "$HOPD_HOME/verl/verl/single_controller/ray/base.py"
 fi
 
-echo "Checking trainer imports before touching GPUs"
+hopd_ts "=== checking trainer imports before touching GPUs"
 python3 -c "import verl.trainer.main_ppo" || {
     echo "ERROR: verl.trainer.main_ppo does not import in $HOPD_VENV" >&2
     echo "       python3 $HOPD_HOME/experiments/mopd/doctor.py" >&2
@@ -393,7 +405,7 @@ for _vf in ${VAL_FILES[@]+"${VAL_FILES[@]}"}; do
         FILTER_ARGS+=(--parquet "$_vf")
     fi
 done
-echo "Warming overlong-prompt cache (skipped when the parquet/length/model match)"
+hopd_ts "=== overlong-prompt filter cache (skipped when the parquet/length/model match)"
 python3 "$HOPD_HOME/experiments/mopd/filter_overlong.py" \
     --model "$STUDENT_MODEL" \
     --max_prompt "$MAX_PROMPT" \
@@ -414,7 +426,7 @@ fi
 RAY_PORT="${RAY_PORT:-6379}"
 export ip_head=$head_node_ip:$RAY_PORT
 export RAY_ADDRESS=$ip_head
-echo "Ray head $ip_head"
+hopd_ts "=== ray start (head $ip_head)"
 
 # Foreground start: `--block` in the background leaves GCS unreachable, and a
 # stale /tmp/ray from a failed start keeps pointing at the old address.
@@ -443,6 +455,7 @@ ray status
 
 MAX_NUM_TOKENS=$(( MAX_PROMPT + MAX_RESPONSE + 1 ))
 
+hopd_ts "=== launching verl.trainer.main_ppo"
 python3 -m verl.trainer.main_ppo \
     --config-path=$VERL_CONFIG_PATH \
     --config-name=ppo_trainer.yaml \
@@ -536,8 +549,9 @@ python3 -m verl.trainer.main_ppo \
     trainer.save_freq=$SAVE_FREQ \
     trainer.test_freq=$TEST_FREQ \
     ${STEP_ARGS[@]+"${STEP_ARGS[@]}"} \
-    2>&1 | tee "$RUN_LOG_DIR/training.log"
+    2>&1 | hopd_ts | tee "$RUN_LOG_DIR/training.log"
 
+hopd_ts "=== trainer exited"
 echo "Checkpoints: $SAVE_DIR"
 echo "Logs:        $RUN_LOG_DIR"
 trap - EXIT
