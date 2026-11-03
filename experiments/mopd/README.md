@@ -62,12 +62,24 @@ bare `python` can be the base conda interpreter even when the prompt says
 
 ## Lightning (3 GPUs)
 
-After clone / venv / `bootstrap_verl.sh` / `download_data.py`:
+One-shot setup (venv under `scratch/.venv`, veRL fork on `hopd`, paper overlay,
+dataset incl. the three eval parquets, `doctor.py`):
 
 ```bash
-cd ~/H-OPD
-source "$HOPD_VENV/bin/activate"
-bash experiments/mopd/run_lightning.sh smoke   # wait for Done.
+git clone <this repo> ~/H-OPD && cd ~/H-OPD
+bash setup/lightning_setup.sh          # ~20 min: wheels + 9 GB dataset
+source scratch/env.sh                  # every new terminal
+bash experiments/mopd/run_lightning.sh papercheck
+python3 experiments/mopd/watch.py --follow   # second terminal
+```
+
+`papercheck` is the paper recipe end to end but short: 512 rows, 12 steps,
+val on MathVista/MathVerse/MathVision (64 rows each) at step 0, 6, 12, one
+checkpoint at step 12. It is the exact env block the TACC job gets (see
+`run_lightning.sh`). Other modes:
+
+```bash
+bash experiments/mopd/run_lightning.sh smoke   # routed MOPD, 96 rows, 2 steps
 bash experiments/mopd/run_lightning.sh mix     # both teachers, p(y_t) mix + k1
 bash experiments/mopd/run_lightning.sh papersmoke # paper recipe, 96 rows, 2 steps, no val
 bash experiments/mopd/run_lightning.sh paperdev   # -dev: 96 rows, 4 steps, MathVista-32
@@ -76,6 +88,10 @@ bash experiments/mopd/run_lightning.sh paper2k    # 2048 rows, 80 steps
 bash experiments/mopd/run_lightning.sh paper20k   # 20k rows, 200 steps
 bash experiments/mopd/run_lightning.sh full
 ```
+
+Knobs (env, any mode): `VAL_SETS=mathvista,mathverse,mathvision`,
+`VAL_MAX_ROWS=0` (full sets), `HOPD_MIX_TAU` (paper 0.5), `STEPS`,
+`TEST_FREQ`, `SAVE_FREQ`, `MOPD_MAX_ROWS`.
 
 ## Watching a run
 
@@ -116,31 +132,42 @@ on that support (`loss_mode=reverse_kl_topk`, `use_policy_gradient=False`).
 The 55k file already stores paper \(\tilde{x}\) in a top-level `text_prompt`
 column (`question [IMAGE DESCRIPTION] <d>`). Student and VL teacher keep
 `prompt` + image. The text teacher is scored on tokenized `text_prompt` (no
-pixels). Mix jobs fail if that column is missing. Held-out acc is
-`mathvista_200_test.parquet` (cleaned into `mopd/mathvista_200_eval.parquet`).
-`watch.py` prints `acc` (train rollouts) and `val_acc` (MathVista). `tilde_x=1`
-means the description path was used.
+pixels). Mix jobs fail if that column is missing. Held-out acc comes from the
+dataset's own eval parquets, picked by `VAL_SETS` (default `mathvista`;
+`mathvista,mathverse,mathvision` for all three), cleaned into
+`mopd/<set>_eval[_N].parquet` and passed as a `data.val_files` list so veRL
+reports `val-core/<data_source>/acc/mean@1` per set. `watch.py` prints `acc`
+(train rollouts), `val:<set>` per eval set, `val_acc` (all val rows),
+`alpha_vl`, `H_vl`, `H_text`, `omega_k`, and `tilde_x` (1 = description path
+used). Mix temperature defaults to the paper's \(\tau=0.5\) (`HOPD_MIX_TAU`).
 
 ```bash
 # LS6 login. Cancel other GPU jobs first (-dev is 1 job/user; extra sbatch hurts Priority).
-cd $SCRATCH/hopd/H-OPD && mkdir -p logs
-squeue -u rkr758
-scancel 3540105 3540127   # hopd-pap + hopd-mop if still PD
+cd $SCRATCH/hopd/H-OPD && mkdir -p logs && git pull --ff-only
+squeue -u $USER
 
-# 1) debug on gpu-a100-dev (2h). Same paper recipe; 96 rows, 4 steps, 32 MathVista val.
+# 1) same block as `run_lightning.sh papercheck` (run this only after it passed on Lightning).
 #    --exclude=c301-002: that -dev node is 2×A100. Command-line -t overrides the 12h header.
-HOPD_PAPER=1 MOPD_MAX_ROWS=96 STEPS=4 TEST_FREQ=4 VAL_MAX_ROWS=32 SAVE_FREQ=-1 \
-  sbatch -p gpu-a100-dev --exclude=c301-002 -t 02:00:00 --job-name=hopd-pdev \
+HOPD_PAPER=1 MOPD_MAX_ROWS=512 STEPS=12 TEST_FREQ=6 SAVE_FREQ=12 \
+  VAL_SETS=mathvista,mathverse,mathvision VAL_MAX_ROWS=64 \
+  sbatch -p gpu-a100-dev --exclude=c301-002 -t 02:00:00 --job-name=hopd-pchk \
   experiments/mopd/run_ls6.sh
 
 # After idev (if you use it instead of sbatch): nvidia-smi -L must print 3 lines, then
-#   bash experiments/mopd/run_lightning.sh paperdev
+#   bash experiments/mopd/run_lightning.sh papercheck
 
-# 2) after -dev shows tilde_x≈1, teacher_mass≈1, and a val_acc number:
+# 2) after the check shows tilde_x≈1, teacher_mass≈1, and val numbers:
 HOPD_PAPER=1 MOPD_MAX_ROWS=2048 STEPS=80 TEST_FREQ=20 SAVE_FREQ=20 \
+  VAL_SETS=mathvista,mathverse,mathvision VAL_MAX_ROWS=0 \
   sbatch -p gpu-a100 --exclude=c301-002 --job-name=hopd-p2k \
   experiments/mopd/run_ls6.sh
 ```
+
+Known failure: before 2026-11-03 `run_ls6.sh` passed `--parquet train val` to
+`filter_overlong.py`, whose flag was `action=append`; argparse rejected the
+second path and exited **2** about ten minutes in, on every job that had a
+separate val parquet (`HOPD_PAPER=1`). Fixed: one `--parquet` per file and the
+flag now also accepts several paths.
 
 `HOPD_MIX=1` is the older approximation: same dual scoring, but only \(p(y_t)\)
 is mixed and the update is k1 + PPO. Do not stack paper reverse KL with
@@ -151,8 +178,10 @@ Still not paper *scale*: 256–20k / 2048 / 256 / bs8 on 3×A100, not 55k / 1238
 logged only; it is not in the paper loss. First paper job after this change
 rebuilds the mix parquet (`MOPD_REBUILD=1` if a stale stamp is reused).
 
-Rollouts gain `alpha_vl` (1 = VL teacher won that sample) and `omega_k` (union
-support size) on the paper path.
+Rollouts gain `alpha_vl` (1 = VL teacher won that sample), `H_vl`/`H_text`
+(top-k entropies), `omega_k` (union support size) and `used_text_prompt` on
+the paper path. Every branch writes the same key set, including the
+one-teacher-errored fallbacks, so `_postprocess` never hits a missing key.
 
 ## Lonestar6
 

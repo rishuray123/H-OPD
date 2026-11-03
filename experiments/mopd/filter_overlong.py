@@ -13,7 +13,8 @@ import sys
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--parquet", required=True, action="append")
+    # Accept both `--parquet a --parquet b` and `--parquet a b`.
+    p.add_argument("--parquet", required=True, action="extend", nargs="+")
     p.add_argument("--model", default=os.environ.get("STUDENT_MODEL", "Qwen/Qwen3-VL-2B-Instruct"))
     p.add_argument("--max_prompt", type=int, default=int(os.environ.get("MAX_PROMPT", 2048)))
     p.add_argument("--image_patch_size", type=int, default=16)

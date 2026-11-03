@@ -29,6 +29,17 @@ DEFAULT_VIEWS = [
     ("tok/s", ["perf/throughput"]),
     ("step_s", ["timing_s/step"]),
 ]
+# Per-sample rollout fields averaged per step. Order = display order.
+ROLLOUT_KEYS = ("acc", "is_vl", "alpha_vl", "H_vl", "H_text", "omega_k", "used_text_prompt")
+# (rollout key, column header, format)
+ROLLOUT_COLS = [
+    ("alpha_vl", "alpha_vl", "{:.3f}"),
+    ("H_vl", "H_vl", "{:.2f}"),
+    ("H_text", "H_text", "{:.2f}"),
+    ("omega_k", "omega_k", "{:.1f}"),
+    ("used_text_prompt", "tilde_x", "{:.2f}"),
+]
+VAL_CORE_RE = re.compile(r"^val-core/(.+)/acc/mean@1$")
 CONSOLE_RE = re.compile(r"step:(\d+)\s+-\s+(.*)")
 PAIR_RE = re.compile(r"([\w./\-]+):(?:np\.float\d+\(|np\.int\d+\()?(-?[\d.eE+]+|nan|inf|-inf)\)?")
 
@@ -93,11 +104,10 @@ def load_rollout_stats(run: str, subdir: str) -> dict[int, dict[str, float]]:
             step = int(os.path.splitext(os.path.basename(path))[0])
         except ValueError:
             continue
-        acc: list[float] = []
-        vl: list[float] = []
-        alpha: list[float] = []
-        omega: list[float] = []
-        tilde: list[float] = []
+        # Per-sample numeric fields written by task_reward.py and the teacher mix
+        # (acc, is_vl, alpha_vl, H_vl, H_text, omega_k, used_text_prompt, ...).
+        sums: dict[str, float] = {}
+        counts: dict[str, int] = {}
         with open(path, errors="replace") as f:
             for line in f:
                 line = line.strip()
@@ -107,28 +117,21 @@ def load_rollout_stats(run: str, subdir: str) -> dict[int, dict[str, float]]:
                     rec = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if isinstance(rec.get("acc"), (int, float)):
-                    acc.append(float(rec["acc"]))
-                if isinstance(rec.get("is_vl"), (int, float)):
-                    vl.append(float(rec["is_vl"]))
-                if isinstance(rec.get("alpha_vl"), (int, float)):
-                    alpha.append(float(rec["alpha_vl"]))
-                if isinstance(rec.get("omega_k"), (int, float)):
-                    omega.append(float(rec["omega_k"]))
-                if isinstance(rec.get("used_text_prompt"), (int, float)):
-                    tilde.append(float(rec["used_text_prompt"]))
-        if acc or alpha or omega or tilde:
-            stats[step] = {"n": float(max(len(acc), len(alpha), len(omega), len(tilde)))}
-            if acc:
-                stats[step]["acc"] = sum(acc) / len(acc)
-            if vl:
-                stats[step]["vl_frac"] = sum(vl) / len(vl)
-            if alpha:
-                stats[step]["alpha_vl"] = sum(alpha) / len(alpha)
-            if omega:
-                stats[step]["omega_k"] = sum(omega) / len(omega)
-            if tilde:
-                stats[step]["used_text_prompt"] = sum(tilde) / len(tilde)
+                for key in ROLLOUT_KEYS:
+                    v = rec.get(key)
+                    if isinstance(v, bool) or not isinstance(v, (int, float)):
+                        continue
+                    if v != v:  # nan: skip (e.g. H_vl when the VL teacher errored)
+                        continue
+                    sums[key] = sums.get(key, 0.0) + float(v)
+                    counts[key] = counts.get(key, 0) + 1
+        if counts:
+            row = {"n": float(max(counts.values()))}
+            for key, c in counts.items():
+                row[key] = sums[key] / c
+            if "is_vl" in row:
+                row["vl_frac"] = row.pop("is_vl")
+            stats[step] = row
     return stats
 
 
@@ -139,8 +142,10 @@ def pick_columns(steps: dict[int, dict[str, float]], extra: list[str], show_all:
     cols = []
     for header, candidates in DEFAULT_VIEWS:
         for cand in candidates:
-            if cand in present:
-                cols.append((header, cand))
+            # veRL logs `distillation/loss` as `actor/distillation/loss`; accept both.
+            hits = [k for k in present if k == cand or k.endswith("/" + cand)]
+            if hits:
+                cols.append((header, sorted(hits, key=len)[0]))
                 break
     for key in extra:
         if key in present:
@@ -148,6 +153,11 @@ def pick_columns(steps: dict[int, dict[str, float]], extra: list[str], show_all:
         else:
             matches = sorted(k for k in present if key in k)
             cols.extend((m, m) for m in matches)
+    # Held-out acc per eval set: val-core/<data_source>/acc/mean@1 -> "val:<set>".
+    for key in sorted(k for k in present if VAL_CORE_RE.match(k)):
+        name = VAL_CORE_RE.match(key).group(1).split("/")[-1].lower()
+        name = re.sub(r"[-_](200|test|eval)$", "", name)
+        cols.append((f"val:{name}", key))
     return cols
 
 
@@ -172,19 +182,17 @@ def render(run: str, args) -> str:
     val_roll = load_rollout_stats(run, "val")
     cols = pick_columns(steps, args.keys.split(",") if args.keys else [], args.all)
 
-    order = sorted(steps)
+    # val_before_train dumps val/0.jsonl before any training step is logged.
+    order = sorted(set(steps) | set(val_roll))
     if not order:
         return f"run {run}\nno steps logged yet — training is still starting up."
+    for s in order:
+        steps.setdefault(s, {})
 
-    show_alpha = any("alpha_vl" in v for v in train_roll.values())
-    show_tilde = any("used_text_prompt" in v for v in train_roll.values())
+    roll_cols = [(k, h, f) for k, h, f in ROLLOUT_COLS if any(k in v for v in train_roll.values())]
     headers = ["step"] + [h for h, _ in cols]
     if train_roll:
-        headers += ["acc", "n"]
-        if show_alpha:
-            headers += ["alpha_vl"]
-        if show_tilde:
-            headers += ["tilde_x"]
+        headers += ["acc", "n"] + [h for _, h, _ in roll_cols]
     if val_roll:
         headers += ["val_acc"]
 
@@ -195,12 +203,9 @@ def render(run: str, args) -> str:
             r = train_roll.get(step, {})
             acc = r.get("acc")
             row += [f"{acc:.3f}" if acc is not None else "-", str(int(r["n"])) if "n" in r else "-"]
-            if show_alpha:
-                a = r.get("alpha_vl")
-                row += [f"{a:.3f}" if a is not None else "-"]
-            if show_tilde:
-                t = r.get("used_text_prompt")
-                row += [f"{t:.2f}" if t is not None else "-"]
+            for key, _, f in roll_cols:
+                v = r.get(key)
+                row += [f.format(v) if v is not None else "-"]
         if val_roll:
             acc = val_roll.get(step, {}).get("acc")
             row += [f"{acc:.3f}" if acc is not None else "-"]
@@ -224,8 +229,16 @@ def render(run: str, args) -> str:
     if trends:
         lines += ["", "first -> last:  " + " | ".join(trends)]
     if train_roll:
-        accs = [train_roll[s]["acc"] for s in sorted(train_roll)]
-        lines.append(f"rollout acc:    {fmt(accs[0])} -> {fmt(accs[-1])} over {len(accs)} steps")
+        accs = [train_roll[s]["acc"] for s in sorted(train_roll) if "acc" in train_roll[s]]
+        if accs:
+            lines.append(f"rollout acc:    {fmt(accs[0])} -> {fmt(accs[-1])} over {len(accs)} steps")
+    if val_roll:
+        vals = [(s, val_roll[s]["acc"]) for s in sorted(val_roll) if "acc" in val_roll[s]]
+        if vals:
+            lines.append(
+                "val acc:        "
+                + " | ".join(f"step {s}: {fmt(a)} (n={int(val_roll[s].get('n', 0))})" for s, a in vals)
+            )
     return "\n".join(lines)
 
 
@@ -236,16 +249,19 @@ def write_csv(run: str, path: str, args) -> None:
     roll = load_rollout_stats(run, "rollouts")
     val = load_rollout_stats(run, "val")
     keys = sorted({k for row in steps.values() for k in row})
+    roll_keys = [k for k in ROLLOUT_KEYS if any(k in r for r in roll.values())]
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["step"] + keys + ["rollout_acc", "rollout_n", "val_acc"])
-        for step in sorted(steps):
+        w.writerow(["step"] + keys + ["rollout_acc", "rollout_n"] + [f"rollout_{k}" for k in roll_keys] + ["val_acc"])
+        for step in sorted(set(steps) | set(val)):
             r = roll.get(step, {})
             v = val.get(step, {})
             w.writerow(
                 [step]
-                + [steps[step].get(k, "") for k in keys]
-                + [r.get("acc", ""), r.get("n", ""), v.get("acc", "")]
+                + [steps.get(step, {}).get(k, "") for k in keys]
+                + [r.get("acc", ""), r.get("n", "")]
+                + [r.get(k, "") for k in roll_keys]
+                + [v.get("acc", "")]
             )
     print(f"wrote {path} ({len(steps)} steps, {len(keys)} metrics)")
 

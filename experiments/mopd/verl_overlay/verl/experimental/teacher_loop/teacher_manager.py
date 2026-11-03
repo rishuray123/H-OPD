@@ -262,6 +262,7 @@ def mix_teacher_token_logprobs(
         "alpha_vl": float(alpha.mean().item()),
         "H_vl": float(h_vl.mean().item()),
         "H_text": float(h_tx.mean().item()),
+        "omega_k": 1.0,
     }
     return mixed_logp, stats
 
@@ -469,6 +470,7 @@ class AsyncTeacherLLMServerManager:
                     "alpha_vl": 0.0,
                     "H_vl": float("nan"),
                     "H_text": 0.0,
+                    "omega_k": 1.0,
                     "used_text_prompt": used_tilde,
                 }
             elif isinstance(text_result, Exception):
@@ -477,6 +479,7 @@ class AsyncTeacherLLMServerManager:
                     "alpha_vl": 1.0,
                     "H_vl": 0.0,
                     "H_text": float("nan"),
+                    "omega_k": 1.0,
                     "used_text_prompt": used_tilde,
                 }
             else:

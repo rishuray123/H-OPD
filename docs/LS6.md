@@ -1,6 +1,6 @@
 # Lonestar6 notes (H-OPD)
 
-Cluster: TACC Lonestar6. Allocation **ECS26006**. User `rkr758`.
+Cluster: TACC Lonestar6. Allocation **ECS26006**. Use `$USER` in commands.
 
 ## Paths for this project
 
@@ -49,6 +49,18 @@ git -C $HOPD_HOME pull --ff-only origin main
 bash $HOPD_HOME/setup/bootstrap_verl.sh   # fetch+checkout origin/hopd
 ```
 
+## Lightning AI (validate before TACC)
+
+Same scripts, no Slurm, no modules. `run_ls6.sh` detects the missing `$SCRATCH`
+and uses `<repo>/scratch` for venv, data, HF cache and checkpoints.
+
+- Setup once: `bash setup/lightning_setup.sh` (uv venv py3.12 at `scratch/.venv`, torch 2.9.0 cu128, vLLM 0.12.0, transformers 4.57.6, numpy 2.2.6, veRL fork `hopd`, paper overlay, `download_data.py`, `doctor.py`). Writes `scratch/env.sh`; `source` it in every new terminal.
+- Run: `bash experiments/mopd/run_lightning.sh papercheck` (3 GPUs). Logs under `logs/mopd_<timestamp>/`; `python3 experiments/mopd/watch.py --follow`.
+- `papercheck` env block = `HOPD_PAPER=1 MOPD_MAX_ROWS=512 STEPS=12 TEST_FREQ=6 SAVE_FREQ=12 VAL_SETS=mathvista,mathverse,mathvision VAL_MAX_ROWS=64`. Pass the identical block to `sbatch experiments/mopd/run_ls6.sh` on LS6 once it passes.
+- Do not set `$SCRATCH` on Lightning; `run_ls6.sh` would then look for `$SCRATCH/hopd/H-OPD`.
+- Lightning studio disk must hold ~10 GB venv + 9 GB dataset + ~20 GB model weights under `scratch/`.
+- Driver must support CUDA 12.8 wheels (torch cu128); check `nvidia-smi` header before installing.
+
 ## Status log
 
 - 2026-09-21: **Routed MOPD smoke passed end to end** on Lightning (3 of 4× L40S 48GB): 96-row slice, 2 steps, ~53s then ~22s per step, `actor/distillation/loss` ≈ −0.8, rewards flat 0.0 by design. Order of failures fixed to get there: Ray bootstrap → numpy 2.2.6 → zero reward fn → prompt-length filter → flash_attn removal → image struct normalization. Caveat: `prompt_length/max` was only 226, i.e. text-sized, so confirm VL rows survive filtering before trusting the mix. `response_length/clip_ratio` 0.5–0.625 at 512 tokens, so raise `MAX_RESPONSE` for real runs.
@@ -93,6 +105,12 @@ bash $HOPD_HOME/setup/bootstrap_verl.sh   # fetch+checkout origin/hopd
 - 2026-10-29: Paper 55k parquet already has \(\tilde{x}\) as top-level `text_prompt` (`[IMAGE DESCRIPTION]`). Mix copies that onto the nested veRL text teacher (student/VL still use `prompt`+image). Paper jobs val on cleaned MathVista-200. Confirm then larger, from a **login** node, numpy **2.2.6**, `--exclude=c301-002`: `HOPD_PAPER=1 MOPD_MAX_ROWS=256 STEPS=20 TEST_FREQ=5 SAVE_FREQ=10 sbatch -p gpu-a100 --exclude=c301-002 experiments/mopd/run_ls6.sh` then `MOPD_MAX_ROWS=2048 STEPS=80 TEST_FREQ=20`. Nested `verl/` must have `tokenize_text_teacher_prompt` (`run_ls6.sh` copies `experiments/mopd/verl_overlay/` into it). `bootstrap_verl.sh` after that copy will wipe the overlay unless `origin/hopd` is updated.
 - 2026-10-29: Paper confirm `sbatch` job **3540127** (`gpu-a100`, `--exclude=c301-002`, `HOPD_PAPER=1 MOPD_MAX_ROWS=256 STEPS=20 TEST_FREQ=5 SAVE_FREQ=10`). Local description/MathVista patches were not pushed yet — TACC only has them if that checkout was copied.
 - 2026-10-30: Job **3540127** still `PD (Priority)` ~12h after submit (`TIME 0:00`). Not started; `gpu-a100` wait. Do not stack extra `idev`/sbatch while it sits.
-- 2026-10-30: `squeue -p gpu-a100` showed a deep backlog (many `Priority` PDs; running jobs already at 1–2 days). Same user also had **3540105** `hopd-pap` pending next to **3540127** `hopd-mop` — two GPU jobs from `rkr758` both `Priority`. Keep one; `scancel` the other.
+- 2026-10-30: `squeue -p gpu-a100` showed a deep backlog (many `Priority` PDs; running jobs already at 1–2 days). The same account also had **3540105** `hopd-pap` pending next to **3540127** `hopd-mop` — two GPU jobs both `Priority`. Keep one; `scancel` the other.
 - 2026-10-30: Debug paper recipe on **`gpu-a100-dev`** (2h, 1 job/user, `--exclude=c301-002`, `-t 02:00:00`) then larger `gpu-a100`. Dev: `HOPD_PAPER=1 MOPD_MAX_ROWS=96 STEPS=4 TEST_FREQ=4 VAL_MAX_ROWS=32`. Cancel 3540105/3540127 first. `run_lightning.sh paperdev` after an `idev` that shows 3 GPUs.
 - 2026-10-30: Job **3541088** `hopd-pdev` submitted to `gpu-a100-dev` after scancel of 3540105/3540127. `grep VAL_MAX_ROWS|paperdev|tokenize_text_teacher_prompt` on TACC was **empty** — cluster clone does not have the description/MathVista patches. That job will run old `HOPD_PAPER=1` (pad-strip text teacher, val=train). Sync files then resubmit.
+- 2026-10-30: TACC `$SCRATCH/hopd/H-OPD` fast-forwarded `dca007e..ee6038b`. `grep VAL_MAX_ROWS|tokenize_text_teacher_prompt` on `run_ls6.sh` matches. 3541088 cancelled; paperdev `sbatch -p gpu-a100-dev --exclude=c301-002 -t 02:00:00` resubmitted after pull.
+- 2026-10-30: Job **3541105** `hopd-pdev` on `gpu-a100-dev` is `PD (Resources)` — waiting for a 3-GPU -dev node; `--exclude=c301-002` is why (that node is 2×A100). Do not submit a second job (`-dev` is 1/user). Still `PD (Resources)` several minutes later; leave it.
+- 2026-11-03: `logs/hopd-pdev_3541105.out` missing on login1 after ~4 days. Slurm only creates that file when the batch script starts — job never left `PD`, or it was cancelled/expired from the `-dev` queue. Check `sacct -j 3541105` / `squeue -j 3541105`.
+- 2026-11-03: **3541105** did run: `FAILED` exit **2:0**, 10m49s, Start `2026-10-29T15:42:31` End `15:53:20` (LS6). No `logs/hopd-pdev*` in the H-OPD `logs/` they listed — find `WorkDir`/`StdOut` via `sacct`. Likely started minutes after the `PD (Resources)` snapshot.
+- 2026-11-03: **Probable cause of 3541105 exit 2**: `run_ls6.sh` called `filter_overlong.py --parquet <train> <val>` but the flag was `action=append` (one value), so argparse rejected the val path — argparse exits **2**. Only paper/full jobs build a separate val parquet, which is why routed MOPD jobs never hit it. Ten minutes matches parquet download/build + 55k-row mix build before the filter step. Fixed in `run_ls6.sh` (one `--parquet` per file) and `filter_overlong.py` (`action=extend nargs=+`). Confirm with `sacct -j 3541105 --format=JobID,NodeList,WorkDir%60,StdOut%80 -P` and the `.err` under that `WorkDir`.
+- 2026-11-03: Paper path defaults changed: `HOPD_MIX_TAU` default **0.5** when `HOPD_PAPER=1` (paper Table 4; was 1.0). `VAL_SETS` selects held-out sets from the dataset's own eval parquets (`mathvista_200_test`, `mathverse_200_test`, `mathvision_test`), passed to veRL as a `data.val_files` list; per-set acc appears as `val-core/<data_source>/acc/mean@1`. Val parquets are now named `mopd/<set>_eval[_N].parquet`. Mix stats (`alpha_vl`, `H_vl`, `H_text`, `omega_k`, `used_text_prompt`) are written on every branch incl. one-teacher fallbacks. Plan: validate `run_lightning.sh papercheck` on a 3-GPU Lightning studio, then submit the same env block on `gpu-a100-dev --exclude=c301-002 -t 02:00:00`.

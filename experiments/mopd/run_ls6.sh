@@ -69,6 +69,10 @@ fi
 # shellcheck disable=SC1090
 source "$HOPD_VENV/bin/activate"
 hopd_activate_env || exit 1
+# Model weights + tokenizer cache. TACC: env_vars.ls6.sh already set this
+# under $SCRATCH/hopd; Lightning (no env script) gets the same layout.
+export HF_HOME="${HF_HOME:-$HOPD_SCRATCH/.cache/huggingface}"
+mkdir -p "$HF_HOME"
 # vLLM workers import numba (numpy<=2.2). A later pip can bump numpy to 2.5
 # and the job dies after occupying a GPU node: Engine core / WorkerProc.
 if ! python -c 'import numpy as n; p=n.__version__.split("."); raise SystemExit(0 if p[0]=="2" and int(p[1])<=2 else 1)'; then
@@ -121,20 +125,45 @@ python "$HOPD_HOME/experiments/mopd/make_routed_parquet.py" --src "$SRC" --out "
 ORIG_TRAIN="$MOPD_TRAIN"
 _USER_VAL="${VAL_FILE:-}"
 VAL_FILE="$MOPD_TRAIN"
-# Paper / full: held-out MathVista-200 acc (paper's published val slice).
+VAL_FILES=()   # one --eval parquet per held-out set; VAL_FILE keeps the first for logging
+# Paper / full: held-out acc on the dataset's own eval parquets. VAL_SETS picks
+# which of the paper's three sets (mathvista,mathverse,mathvision); default
+# MathVista-200 only. VAL_MAX_ROWS>0 slices each set (dev runs).
+VAL_SETS="${VAL_SETS:-mathvista}"
 if [[ -n "$_USER_VAL" ]]; then
     VAL_FILE="$_USER_VAL"
+    VAL_FILES=("$_USER_VAL")
 elif [[ "${HOPD_PAPER:-0}" == "1" || "${MOPD_FULL:-0}" == "1" ]]; then
-    _valsrc="$(find "$HOPD_DATA_ROOT" -name 'mathvista_200_test.parquet' | head -1 || true)"
-    if [[ -n "$_valsrc" && -f "$_valsrc" ]]; then
-        _val_tag=""
-        if [[ "${VAL_MAX_ROWS:-0}" -gt 0 ]]; then
-            _val_tag="_${VAL_MAX_ROWS}"
-        fi
-        VAL_FILE="$HOPD_DATA_ROOT/mopd/mathvista_200_eval${_val_tag}.parquet"
-        python "$HOPD_HOME/experiments/mopd/make_routed_parquet.py" --src "$_valsrc" --out "$VAL_FILE" \
-            --eval --max_rows "${VAL_MAX_ROWS:-0}" --image_max_pixels "${MOPD_IMAGE_MAX_PIXELS:-262144}"
+    _val_tag=""
+    if [[ "${VAL_MAX_ROWS:-0}" -gt 0 ]]; then
+        _val_tag="_${VAL_MAX_ROWS}"
     fi
+    for _vs in ${VAL_SETS//,/ }; do
+        case "$_vs" in
+            mathvista)  _valname='mathvista_200_test.parquet' ;;
+            mathverse)  _valname='mathverse_200_test.parquet' ;;
+            mathvision) _valname='mathvision_test.parquet' ;;
+            *) echo "ERROR: VAL_SETS entry '$_vs' unknown (mathvista|mathverse|mathvision)" >&2; exit 1 ;;
+        esac
+        _valsrc="$(find "$HOPD_DATA_ROOT" -name "$_valname" | head -1 || true)"
+        if [[ -z "$_valsrc" || ! -f "$_valsrc" ]]; then
+            echo "WARN: $_valname not under $HOPD_DATA_ROOT; skipping $_vs val" >&2
+            continue
+        fi
+        _valout="$HOPD_DATA_ROOT/mopd/${_valname%.parquet}_eval${_val_tag}.parquet"
+        python "$HOPD_HOME/experiments/mopd/make_routed_parquet.py" --src "$_valsrc" --out "$_valout" \
+            --eval --max_rows "${VAL_MAX_ROWS:-0}" --image_max_pixels "${MOPD_IMAGE_MAX_PIXELS:-262144}"
+        VAL_FILES+=("$_valout")
+    done
+    if [[ ${#VAL_FILES[@]} -gt 0 ]]; then
+        VAL_FILE="${VAL_FILES[0]}"
+    fi
+fi
+# Hydra list syntax for data.val_files when more than one set is used.
+if [[ ${#VAL_FILES[@]} -gt 1 ]]; then
+    VAL_FILES_ARG="[$(IFS=,; echo "${VAL_FILES[*]}")]"
+else
+    VAL_FILES_ARG="$VAL_FILE"
 fi
 
 export VLLM_USE_V1=1
@@ -255,16 +284,17 @@ if [[ "${HOPD_PAPER:-0}" == "1" ]]; then
     LOSS_MODE="reverse_kl_topk"
     USE_POLICY_GRADIENT=False
     USE_TASK_REWARDS=False
-    MIX_ARGS=(distillation.mix_teachers=True distillation.mix_temperature="${HOPD_MIX_TAU:-1.0}")
+    # Paper Table 4: arbitration temperature tau = 0.5.
+    MIX_ARGS=(distillation.mix_teachers=True distillation.mix_temperature="${HOPD_MIX_TAU:-0.5}")
     RUN_TAG="${RUN_TAG}-paper"
     if [[ -z "${_MAX_RESPONSE_SET:-}" ]]; then
         MAX_RESPONSE=256
     fi
     USE_TORCH_COMPILE="${USE_TORCH_COMPILE:-False}"
     echo "HOPD_PAPER=1: union Ω_t mix, reverse KL, supervised (no PPO, no task reward)"
-    echo "HOPD_PAPER=1: text teacher uses parquet text_prompt ([IMAGE DESCRIPTION])"
+    echo "HOPD_PAPER=1: text teacher uses parquet text_prompt ([IMAGE DESCRIPTION]); tau=${HOPD_MIX_TAU:-0.5} topk=$TOPK lr=$LR"
     echo "HOPD_PAPER=1: MAX_RESPONSE=$MAX_RESPONSE use_torch_compile=$USE_TORCH_COMPILE"
-    echo "HOPD_PAPER=1: val=$VAL_FILE TEST_FREQ=$TEST_FREQ val_before_train=$VAL_BEFORE_TRAIN"
+    echo "HOPD_PAPER=1: val_sets=$VAL_SETS val=$VAL_FILES_ARG TEST_FREQ=$TEST_FREQ val_before_train=$VAL_BEFORE_TRAIN"
 fi
 USE_TORCH_COMPILE="${USE_TORCH_COMPILE:-True}"
 # Student vLLM is colocated with FSDP+Adam on GPU 0. Paper reverse KL
@@ -323,17 +353,21 @@ python3 -c "from verl.experimental.teacher_loop.teacher_manager import tokenize_
     exit 1
 }
 
-FILTER_PARQUETS=("$ORIG_TRAIN")
-if [[ "$VAL_FILE" != "$ORIG_TRAIN" ]]; then
-    FILTER_PARQUETS+=("$VAL_FILE")
-fi
+# filter_overlong.py declares --parquet with action=append: one flag per file.
+# (Passing several paths after a single --parquet is an argparse error, exit 2.)
+FILTER_ARGS=(--parquet "$ORIG_TRAIN")
+for _vf in ${VAL_FILES[@]+"${VAL_FILES[@]}"}; do
+    if [[ "$_vf" != "$ORIG_TRAIN" ]]; then
+        FILTER_ARGS+=(--parquet "$_vf")
+    fi
+done
 echo "Warming overlong-prompt cache (skipped when the parquet/length/model match)"
 python3 "$HOPD_HOME/experiments/mopd/filter_overlong.py" \
     --model "$STUDENT_MODEL" \
     --max_prompt "$MAX_PROMPT" \
     --image_patch_size 16 \
     --workers "${FILTER_WORKERS:-4}" \
-    --parquet "${FILTER_PARQUETS[@]}"
+    "${FILTER_ARGS[@]}"
 
 unset RAY_ADDRESS ip_head || true
 if [[ -n "${SLURM_JOB_NODELIST:-}" ]]; then
@@ -382,7 +416,7 @@ python3 -m verl.trainer.main_ppo \
     --config-name=ppo_trainer.yaml \
     \
     data.train_files=$MOPD_TRAIN \
-    data.val_files=$VAL_FILE \
+    data.val_files="$VAL_FILES_ARG" \
     data.train_batch_size=$TRAIN_BSZ \
     data.max_prompt_length=$MAX_PROMPT \
     data.max_response_length=$MAX_RESPONSE \

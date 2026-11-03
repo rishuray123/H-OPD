@@ -5,6 +5,7 @@
 #   bash experiments/mopd/run_lightning.sh mix      # both teachers, p(y_t) mix + k1
 #   bash experiments/mopd/run_lightning.sh papersmoke # paper recipe, 96 rows, 2 steps, no val
 #   bash experiments/mopd/run_lightning.sh paperdev # -dev debug: paper recipe, 96 rows, 4 steps, MathVista-32
+#   bash experiments/mopd/run_lightning.sh papercheck # paper recipe, 512 rows, 12 steps, all 3 eval sets x64, ckpt
 #   bash experiments/mopd/run_lightning.sh paper    # paper confirm: 256 rows, 20 steps, MathVista acc
 #   bash experiments/mopd/run_lightning.sh paper2k  # paper 2k rows, 80 steps, MathVista acc
 #   bash experiments/mopd/run_lightning.sh paper20k # paper 20k rows, 200 steps, MathVista acc
@@ -13,6 +14,11 @@ set -euo pipefail
 MODE="${1:-smoke}"
 HOPD_HOME="${HOPD_HOME:-$(cd "$(dirname "$0")/../.." && pwd)}"
 export HOPD_HOME
+# setup/lightning_setup.sh writes venv/data/HF cache exports here.
+if [[ -f "$HOPD_HOME/scratch/env.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "$HOPD_HOME/scratch/env.sh"
+fi
 export SKIP_INSTALL="${SKIP_INSTALL:-1}"
 
 ngpu=0
@@ -76,6 +82,22 @@ case "$MODE" in
         export HOPD_PAPER=1
         echo "PAPER -dev: ${MOPD_MAX_ROWS} rows, STEPS=${STEPS}, MathVista-${VAL_MAX_ROWS} val every ${TEST_FREQ}"
         ;;
+    papercheck)
+        # Paper recipe end to end, short: every metric the full run logs
+        # (distill loss, masses, entropy, grad_norm, train acc, alpha_vl,
+        # H_vl/H_text, omega_k, tilde_x) + held-out acc on all three paper
+        # eval sets (sliced to VAL_MAX_ROWS each) at step 0 and every TEST_FREQ,
+        # one checkpoint at the end. Same env block is what TACC runs.
+        export MOPD_MAX_ROWS="${MOPD_MAX_ROWS:-512}"
+        export STEPS="${STEPS:-12}"
+        export TEST_FREQ="${TEST_FREQ:-6}"
+        export SAVE_FREQ="${SAVE_FREQ:-12}"
+        export VAL_SETS="${VAL_SETS:-mathvista,mathverse,mathvision}"
+        export VAL_MAX_ROWS="${VAL_MAX_ROWS:-64}"
+        export MOPD_FULL=0
+        export HOPD_PAPER=1
+        echo "PAPER check: ${MOPD_MAX_ROWS} rows, STEPS=${STEPS}, val {${VAL_SETS}} x${VAL_MAX_ROWS} every ${TEST_FREQ}, ckpt at ${SAVE_FREQ}"
+        ;;
     paper)
         export MOPD_MAX_ROWS="${MOPD_MAX_ROWS:-256}"
         export STEPS="${STEPS:-20}"
@@ -104,7 +126,7 @@ case "$MODE" in
         echo "PAPER 20k: union Ω_t mix, reverse KL, no PPO, ${MOPD_MAX_ROWS} rows, STEPS=${STEPS}, ckpt/val every ${SAVE_FREQ}/${TEST_FREQ}"
         ;;
     *)
-        echo "Usage: $0 smoke|full|mix|papersmoke|paperdev|paper|paper2k|paper20k" >&2
+        echo "Usage: $0 smoke|full|mix|papersmoke|paperdev|papercheck|paper|paper2k|paper20k" >&2
         exit 1
         ;;
 esac
