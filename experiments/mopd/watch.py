@@ -156,7 +156,7 @@ def pick_columns(steps: dict[int, dict[str, float]], extra: list[str], show_all:
     # Held-out acc per eval set: val-core/<data_source>/acc/mean@1 -> "val:<set>".
     for key in sorted(k for k in present if VAL_CORE_RE.match(k)):
         name = VAL_CORE_RE.match(key).group(1).split("/")[-1].lower()
-        name = re.sub(r"[-_](200|test|eval)$", "", name)
+        name = re.sub(r"([-_]*(200|test|eval|mini))+$", "", name).rstrip("-_")
         cols.append((f"val:{name}", key))
     return cols
 
