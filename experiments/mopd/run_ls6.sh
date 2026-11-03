@@ -245,12 +245,36 @@ if [[ -z "${STUDENT_GPUS:-}" ]]; then
     fi
 fi
 GPUS_ON_NODE=$((STUDENT_GPUS + TEACHER_GPUS))
-if [[ "$NGPU" -gt 0 && "$GPUS_ON_NODE" -gt "$NGPU" ]]; then
-    echo "ERROR: need $GPUS_ON_NODE GPUs (student $STUDENT_GPUS + teachers $TEACHER_GPUS), found $NGPU" >&2
-    echo "       gpu-a100-dev node c301-002 is 2×A100 — exit and retry, or sbatch --exclude=c301-002" >&2
+# Debug on a 2-GPU node (gpu-a100-dev c301-002): both 4B teachers share one
+# physical GPU via Ray fractional bundles (VERL_TEACHER_POOL_GPU_FRACTION=0.5,
+# overlay patch in single_controller/ray/base.py). Each teacher vLLM then gets
+# gpu_memory_utilization 0.40 of a 40GB A100 (~8GB weights + KV each). Slower
+# (teachers serialize on one device) but every code path is identical.
+if [[ -z "${HOPD_TEACHERS_SHARE_GPU:-}" ]]; then
+    if [[ "$NGPU" -gt 0 && "$GPUS_ON_NODE" -gt "$NGPU" && "$TEACHER_GPUS" -eq 2 && "$((STUDENT_GPUS + 1))" -le "$NGPU" ]]; then
+        HOPD_TEACHERS_SHARE_GPU=1
+        echo "Only $NGPU GPUs: auto-enabling HOPD_TEACHERS_SHARE_GPU=1 (teachers share one GPU)"
+    else
+        HOPD_TEACHERS_SHARE_GPU=0
+    fi
+fi
+RAY_GPUS=$GPUS_ON_NODE
+if [[ "$HOPD_TEACHERS_SHARE_GPU" == "1" ]]; then
+    if [[ "$TEACHER_GPUS" -ne 2 ]]; then
+        echo "ERROR: HOPD_TEACHERS_SHARE_GPU=1 expects TEACHER_GPUS=2 (two 1-GPU teachers)" >&2
+        exit 1
+    fi
+    export VERL_TEACHER_POOL_GPU_FRACTION=0.5
+    TEACHER_GPU_UTIL="${TEACHER_GPU_UTIL:-0.40}"
+    RAY_GPUS=$((STUDENT_GPUS + 1))
+    RUN_TAG="${RUN_TAG}-tshare"
+fi
+if [[ "$NGPU" -gt 0 && "$RAY_GPUS" -gt "$NGPU" ]]; then
+    echo "ERROR: need $RAY_GPUS GPUs (student $STUDENT_GPUS + teachers), found $NGPU" >&2
+    echo "       gpu-a100-dev node c301-002 is 2×A100 — HOPD_TEACHERS_SHARE_GPU=1 fits it with STUDENT_GPUS=1" >&2
     exit 1
 fi
-echo "GPUs: student=$STUDENT_GPUS teacher=$TEACHER_GPUS (ray --num-gpus=$GPUS_ON_NODE)"
+echo "GPUs: student=$STUDENT_GPUS teacher_bundles=$TEACHER_GPUS share=$HOPD_TEACHERS_SHARE_GPU (ray --num-gpus=$RAY_GPUS)"
 # generate_sequences chunks the batch across agent.num_workers; size must divide.
 if [[ -z "${AGENT_WORKERS:-}" ]]; then
     if (( TRAIN_BSZ % 8 == 0 )); then
@@ -339,6 +363,8 @@ if [[ -d "$_OVERLAY/verl" && -d "$HOPD_HOME/verl/verl" ]]; then
         "$HOPD_HOME/verl/verl/experimental/teacher_loop/teacher_manager.py"
     cp "$_OVERLAY/verl/experimental/agent_loop/agent_loop.py" \
         "$HOPD_HOME/verl/verl/experimental/agent_loop/agent_loop.py"
+    cp "$_OVERLAY/verl/single_controller/ray/base.py" \
+        "$HOPD_HOME/verl/verl/single_controller/ray/base.py"
 fi
 
 echo "Checking trainer imports before touching GPUs"
@@ -352,6 +378,12 @@ python3 -c "from verl.experimental.teacher_loop.teacher_manager import tokenize_
     echo "       bash setup/bootstrap_verl.sh then rerun; overlay is copied at job start." >&2
     exit 1
 }
+if [[ "$HOPD_TEACHERS_SHARE_GPU" == "1" ]]; then
+    python3 -c "import inspect; from verl.single_controller.ray.base import RayResourcePool as R; assert 'gpu_per_bundle' in inspect.signature(R).parameters" || {
+        echo "ERROR: nested veRL lacks fractional teacher pool (overlay single_controller/ray/base.py did not apply)." >&2
+        exit 1
+    }
+fi
 
 # filter_overlong.py declares --parquet with action=append: one flag per file.
 # (Passing several paths after a single --parquet is an argparse error, exit 2.)
@@ -390,7 +422,7 @@ if [[ "${SKIP_RAY_START:-0}" != "1" ]]; then
     ray stop --force 2>/dev/null || true
     rm -rf /tmp/ray
     ray start --head --node-ip-address="$head_node_ip" --port=$RAY_PORT \
-        --num-cpus="${RAY_NUM_CPUS:-16}" --num-gpus=$GPUS_ON_NODE \
+        --num-cpus="${RAY_NUM_CPUS:-16}" --num-gpus=$RAY_GPUS \
         --disable-usage-stats \
         > "$RUN_LOG_DIR/ray_head.log" 2>&1
     echo "---- ray_head.log ----"

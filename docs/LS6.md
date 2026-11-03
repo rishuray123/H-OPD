@@ -26,9 +26,11 @@ Venvs and checkpoints on `$SCRATCH`, never `$WORK`.
 - Before launching mix/paper (needs 3 GPUs), run `nvidia-smi -L`. `c301-002` on `gpu-a100-dev` (2026-10-27) had only **2× A100-PCIE-40GB** (`CUDA_VISIBLE_DEVICES` empty, `GRES` empty). `idev` does **not** take `--gres` (that error-parses the time as an option). Use `-m` for minutes, then skip 2-GPU nodes:
 
 ```bash
-idev -p gpu-a100-dev -A ECS26006 -N 1 -n 1 -m 60
-nvidia-smi -L   # need 3 lines; if 2, exit and idev again
+idev -p gpu-a100-dev -A ECS26006 -N 1 -n 1 -m 120
+nvidia-smi -L   # 3 lines = normal split; 2 lines = teachers share one GPU (debug mode below)
 ```
+
+- **2-GPU debug mode** (since 2026-11-03): `run_ls6.sh` auto-sets `HOPD_TEACHERS_SHARE_GPU=1` when it sees 2 GPUs: student on GPU 0, both 4B teachers on GPU 1 as Ray fractional bundles (`VERL_TEACHER_POOL_GPU_FRACTION=0.5`, `TEACHER_GPU_UTIL=0.40` each, overlay patch `verl_overlay/verl/single_controller/ray/base.py`). Same code paths as 3 GPUs; teacher scoring is slower. So `c301-002` is usable for debugging; `--exclude=c301-002` is only for timing/throughput runs. Force with `HOPD_TEACHERS_SHARE_GPU=1` (3-GPU node) or disable with `=0`.
 
 ```bash
 # cancel a stuck -dev wait (Ctrl-C), then:
@@ -114,3 +116,4 @@ and uses `<repo>/scratch` for venv, data, HF cache and checkpoints.
 - 2026-11-03: **3541105** did run: `FAILED` exit **2:0**, 10m49s, Start `2026-10-29T15:42:31` End `15:53:20` (LS6). No `logs/hopd-pdev*` in the H-OPD `logs/` they listed — find `WorkDir`/`StdOut` via `sacct`. Likely started minutes after the `PD (Resources)` snapshot.
 - 2026-11-03: **Probable cause of 3541105 exit 2**: `run_ls6.sh` called `filter_overlong.py --parquet <train> <val>` but the flag was `action=append` (one value), so argparse rejected the val path — argparse exits **2**. Only paper/full jobs build a separate val parquet, which is why routed MOPD jobs never hit it. Ten minutes matches parquet download/build + 55k-row mix build before the filter step. Fixed in `run_ls6.sh` (one `--parquet` per file) and `filter_overlong.py` (`action=extend nargs=+`). Confirm with `sacct -j 3541105 --format=JobID,NodeList,WorkDir%60,StdOut%80 -P` and the `.err` under that `WorkDir`.
 - 2026-11-03: Paper path defaults changed: `HOPD_MIX_TAU` default **0.5** when `HOPD_PAPER=1` (paper Table 4; was 1.0). `VAL_SETS` selects held-out sets from the dataset's own eval parquets (`mathvista_200_test`, `mathverse_200_test`, `mathvision_test`), passed to veRL as a `data.val_files` list; per-set acc appears as `val-core/<data_source>/acc/mean@1`. Val parquets are now named `mopd/<set>_eval[_N].parquet`. Mix stats (`alpha_vl`, `H_vl`, `H_text`, `omega_k`, `used_text_prompt`) are written on every branch incl. one-teacher fallbacks. Plan: validate `run_lightning.sh papercheck` on a 3-GPU Lightning studio, then submit the same env block on `gpu-a100-dev --exclude=c301-002 -t 02:00:00`.
+- 2026-11-03: Lightning unavailable; debug on LS6 `-dev` instead. Added the 2-GPU teacher-sharing mode (see Queues) so the idle `c301-002` works. Debug submit from a login node: `HOPD_PAPER=1 MOPD_MAX_ROWS=512 STEPS=12 TEST_FREQ=6 SAVE_FREQ=12 VAL_SETS=mathvista,mathverse,mathvision VAL_MAX_ROWS=64 sbatch -p gpu-a100-dev -t 02:00:00 --job-name=hopd-pchk experiments/mopd/run_ls6.sh` (no `--exclude`). Memory budget on the shared A100-40GB: 2 × 0.40 × 40 = 32 GB for the two vLLM teachers + two CUDA contexts; vLLM refuses to start if free memory < util × total, so the second teacher needs ≥16 GB free after the first — satisfied. Student GPU unchanged (vLLM 0.40 + FSDP/Adam).

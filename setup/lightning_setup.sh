@@ -43,6 +43,7 @@ OVERLAY="$HOPD_HOME/experiments/mopd/verl_overlay/verl/experimental"
 if [[ -d "$OVERLAY" ]]; then
     cp -v "$OVERLAY/teacher_loop/teacher_manager.py" "$HOPD_HOME/verl/verl/experimental/teacher_loop/teacher_manager.py"
     cp -v "$OVERLAY/agent_loop/agent_loop.py" "$HOPD_HOME/verl/verl/experimental/agent_loop/agent_loop.py"
+    cp -v "$OVERLAY/../single_controller/ray/base.py" "$HOPD_HOME/verl/verl/single_controller/ray/base.py"
 fi
 python -c "from verl.experimental.teacher_loop.teacher_manager import tokenize_text_teacher_prompt; print('overlay OK')"
 

@@ -7,6 +7,9 @@ text teacher on the parquet `text_prompt` (\(\tilde{x}\) with `[IMAGE DESCRIPTIO
 held-out **MathVista-200** `acc`.
 
 GPU split: student 2B on **1** GPU, VL 4B teacher on **1**, text `Qwen3-4B-Instruct-2507` on **1**. A 1×H100 dump machine cannot run this.
+Debug-only 2-GPU layout: `HOPD_TEACHERS_SHARE_GPU=1` (auto when only 2 GPUs are
+visible) puts both teachers on GPU 1 as Ray fractional bundles (0.40 util each);
+same code paths, slower teacher scoring.
 
 Even rows → VL teacher (images kept). Odd rows → text teacher (images cleared).
 
@@ -146,15 +149,18 @@ used). Mix temperature defaults to the paper's \(\tau=0.5\) (`HOPD_MIX_TAU`).
 cd $SCRATCH/hopd/H-OPD && mkdir -p logs && git pull --ff-only
 squeue -u $USER
 
-# 1) same block as `run_lightning.sh papercheck` (run this only after it passed on Lightning).
-#    --exclude=c301-002: that -dev node is 2×A100. Command-line -t overrides the 12h header.
+# 1) debug: same block as `run_lightning.sh papercheck`, on gpu-a100-dev (2h).
+#    No --exclude: if the job lands on 2-GPU c301-002, run_ls6.sh auto-enables
+#    HOPD_TEACHERS_SHARE_GPU=1 (both 4B teachers on one GPU, Ray fractional
+#    bundles, 0.40 util each). Same code paths, just slower. -t overrides the 12h header.
 HOPD_PAPER=1 MOPD_MAX_ROWS=512 STEPS=12 TEST_FREQ=6 SAVE_FREQ=12 \
   VAL_SETS=mathvista,mathverse,mathvision VAL_MAX_ROWS=64 \
-  sbatch -p gpu-a100-dev --exclude=c301-002 -t 02:00:00 --job-name=hopd-pchk \
+  sbatch -p gpu-a100-dev -t 02:00:00 --job-name=hopd-pchk \
   experiments/mopd/run_ls6.sh
 
-# After idev (if you use it instead of sbatch): nvidia-smi -L must print 3 lines, then
-#   bash experiments/mopd/run_lightning.sh papercheck
+# Interactive instead: idev -p gpu-a100-dev -m 120 -N 1 -n 1 ; then
+#   cd $SCRATCH/hopd/H-OPD && bash experiments/mopd/run_lightning.sh papercheck
+# (2 or 3 GPUs both work; tail logs/mopd_latest/training.log)
 
 # 2) after the check shows tilde_x≈1, teacher_mass≈1, and val numbers:
 HOPD_PAPER=1 MOPD_MAX_ROWS=2048 STEPS=80 TEST_FREQ=20 SAVE_FREQ=20 \
