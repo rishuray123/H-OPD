@@ -129,7 +129,7 @@ if [[ "$MIX" == "1" ]]; then
     KEEP_IMG_ARGS=(--keep_all_images)
     REQUIRE_TXT_ARGS=(--require_text_prompt)
 fi
-hopd_ts "=== building train/val parquets"
+hopd_ts "=== building train/val parquets (stamp reuse needs no pandas import)"
 python "$HOPD_HOME/experiments/mopd/make_routed_parquet.py" --src "$SRC" --out "$MOPD_TRAIN" \
     --max_rows "$MAX_ROWS" --image_max_pixels "${MOPD_IMAGE_MAX_PIXELS:-262144}" \
     ${KEEP_IMG_ARGS[@]+"${KEEP_IMG_ARGS[@]}"} \
@@ -379,22 +379,30 @@ if [[ -d "$_OVERLAY/verl" && -d "$HOPD_HOME/verl/verl" ]]; then
         "$HOPD_HOME/verl/verl/single_controller/ray/base.py"
 fi
 
-hopd_ts "=== checking trainer imports before touching GPUs"
-python3 -c "import verl.trainer.main_ppo" || {
-    echo "ERROR: verl.trainer.main_ppo does not import in $HOPD_VENV" >&2
-    echo "       python3 $HOPD_HOME/experiments/mopd/doctor.py" >&2
-    exit 1
-}
-python3 -c "from verl.experimental.teacher_loop.teacher_manager import tokenize_text_teacher_prompt" || {
+# Every python process that imports torch/vLLM from the $SCRATCH venv costs
+# minutes on a slow Lustre day (job 3550884 spent >25 min here). Overlay
+# presence is checked with grep (no imports); the single heavy import check
+# can be skipped with HOPD_SKIP_IMPORT_CHECK=1 when the venv is known good.
+hopd_ts "=== checking paper overlay (grep, no imports)"
+grep -q "def tokenize_text_teacher_prompt" "$HOPD_HOME/verl/verl/experimental/teacher_loop/teacher_manager.py" || {
     echo "ERROR: nested veRL is missing paper text_prompt scoring (overlay did not apply)." >&2
     echo "       bash setup/bootstrap_verl.sh then rerun; overlay is copied at job start." >&2
     exit 1
 }
 if [[ "$HOPD_TEACHERS_SHARE_GPU" == "1" ]]; then
-    python3 -c "import inspect; from verl.single_controller.ray.base import RayResourcePool as R; assert 'gpu_per_bundle' in inspect.signature(R).parameters" || {
+    grep -q "gpu_per_bundle" "$HOPD_HOME/verl/verl/single_controller/ray/base.py" || {
         echo "ERROR: nested veRL lacks fractional teacher pool (overlay single_controller/ray/base.py did not apply)." >&2
         exit 1
     }
+fi
+if [[ "${HOPD_SKIP_IMPORT_CHECK:-0}" != "1" ]]; then
+    hopd_ts "=== checking trainer imports before touching GPUs (HOPD_SKIP_IMPORT_CHECK=1 to skip)"
+    python3 -c "import verl.trainer.main_ppo; from verl.experimental.teacher_loop.teacher_manager import tokenize_text_teacher_prompt" || {
+        echo "ERROR: verl.trainer.main_ppo / paper teacher_manager do not import in $HOPD_VENV" >&2
+        echo "       python3 $HOPD_HOME/experiments/mopd/doctor.py" >&2
+        exit 1
+    }
+    hopd_ts "=== imports OK"
 fi
 
 # filter_overlong.py declares --parquet with action=append: one flag per file.
@@ -405,13 +413,19 @@ for _vf in ${VAL_FILES[@]+"${VAL_FILES[@]}"}; do
         FILTER_ARGS+=(--parquet "$_vf")
     fi
 done
-hopd_ts "=== overlong-prompt filter cache (skipped when the parquet/length/model match)"
-python3 "$HOPD_HOME/experiments/mopd/filter_overlong.py" \
-    --model "$STUDENT_MODEL" \
-    --max_prompt "$MAX_PROMPT" \
-    --image_patch_size 16 \
-    --workers "${FILTER_WORKERS:-4}" \
-    "${FILTER_ARGS[@]}"
+# Pre-warms veRL's overlong-prompt index cache on CPU. The trainer builds the
+# same cache itself if this is skipped (HOPD_SKIP_FILTER=1), it just does so
+# after the GPUs are allocated — one fewer torch import on the startup path.
+if [[ "${HOPD_SKIP_FILTER:-0}" != "1" ]]; then
+    hopd_ts "=== overlong-prompt filter cache (HOPD_SKIP_FILTER=1 to let the trainer do it)"
+    python3 "$HOPD_HOME/experiments/mopd/filter_overlong.py" \
+        --model "$STUDENT_MODEL" \
+        --max_prompt "$MAX_PROMPT" \
+        --image_patch_size 16 \
+        --workers "${FILTER_WORKERS:-4}" \
+        "${FILTER_ARGS[@]}"
+    hopd_ts "=== filter cache done"
+fi
 
 unset RAY_ADDRESS ip_head || true
 if [[ -n "${SLURM_JOB_NODELIST:-}" ]]; then

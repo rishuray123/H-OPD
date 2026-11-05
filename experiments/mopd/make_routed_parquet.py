@@ -8,26 +8,39 @@ import os
 import sys
 from pathlib import Path
 
-import pandas as pd
-import pyarrow as pa
-import pyarrow.parquet as pq
+# pandas / pyarrow are imported lazily in _load_heavy(): on Lustre each import
+# costs minutes, and the common case (stamp matches -> reuse) needs neither.
+pd = pa = pq = None
+text_prompt_has_description = None
 
 _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
-from experiments.mopd.paper_prompts import text_prompt_has_description  # noqa: E402
+
+
+def _load_heavy() -> None:
+    global pd, pa, pq, text_prompt_has_description, _IMAGE_STRUCT, _IMAGES_TYPE
+    import pandas as _pd
+    import pyarrow as _pa
+    import pyarrow.parquet as _pq
+
+    from experiments.mopd.paper_prompts import text_prompt_has_description as _tphd
+
+    pd, pa, pq, text_prompt_has_description = _pd, _pa, _pq, _tphd
+    _IMAGE_STRUCT = _pa.struct(
+        [
+            _pa.field("bytes", _pa.binary()),
+            _pa.field("max_pixels", _pa.int64()),
+            _pa.field("min_pixels", _pa.int64()),
+        ]
+    )
+    _IMAGES_TYPE = _pa.list_(_IMAGE_STRUCT)
 
 # HuggingFace `datasets` materializes every Arrow struct field, including
 # nulls. If this schema kept the source `image` field, process_image would
 # still see both `bytes` and `image` even after we dropped nulls in pandas.
-_IMAGE_STRUCT = pa.struct(
-    [
-        pa.field("bytes", pa.binary()),
-        pa.field("max_pixels", pa.int64()),
-        pa.field("min_pixels", pa.int64()),
-    ]
-)
-_IMAGES_TYPE = pa.list_(_IMAGE_STRUCT)
+_IMAGE_STRUCT = None  # set by _load_heavy()
+_IMAGES_TYPE = None
 
 
 def _as_bytes(raw) -> bytes:
@@ -72,7 +85,7 @@ def _clean_images(images, max_pixels: int, min_pixels: int):
         return images
 
 
-def _write_parquet(df: pd.DataFrame, out: Path) -> None:
+def _write_parquet(df, out: Path) -> None:
     """Write with an images schema that cannot resurrect a null `image` field."""
     if "images" in df.columns:
         other = df.drop(columns=["images"])
@@ -144,6 +157,7 @@ def main() -> None:
                 return
         except (OSError, json.JSONDecodeError):
             pass
+    _load_heavy()
     df = pd.read_parquet(src)
     if df.empty:
         raise SystemExit(f"empty parquet: {src}")
