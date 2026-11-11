@@ -190,6 +190,7 @@ export VERL_USE_UV=0
 STUDENT_MODEL="Qwen/Qwen3-VL-2B-Instruct"
 TEACHER_VL="Qwen/Qwen3-VL-4B-Instruct"
 TEACHER_TEXT="Qwen/Qwen3-4B-Instruct-2507"
+_TRAIN_BSZ_SET="${TRAIN_BSZ+x}"
 TRAIN_BSZ="${TRAIN_BSZ:-8}"
 PPO_MICRO_BSZ=1
 # Image tokens inflate a VL prompt well past the text length, so 512 drops or
@@ -287,18 +288,6 @@ if [[ "$NGPU" -gt 0 && "$RAY_GPUS" -gt "$NGPU" ]]; then
     exit 1
 fi
 echo "GPUs: student=$STUDENT_GPUS teacher_bundles=$TEACHER_GPUS share=$HOPD_TEACHERS_SHARE_GPU (ray --num-gpus=$RAY_GPUS)"
-# generate_sequences chunks the batch across agent.num_workers; size must divide.
-if [[ -z "${AGENT_WORKERS:-}" ]]; then
-    if (( TRAIN_BSZ % 8 == 0 )); then
-        AGENT_WORKERS=8
-    else
-        AGENT_WORKERS=$TRAIN_BSZ
-    fi
-fi
-if (( TRAIN_BSZ % AGENT_WORKERS != 0 )); then
-    echo "ERROR: TRAIN_BSZ=$TRAIN_BSZ must be divisible by AGENT_WORKERS=$AGENT_WORKERS" >&2
-    exit 1
-fi
 USE_TASK_REWARDS=False
 USE_POLICY_GRADIENT=True
 ROLLOUT_N="${HOPD_ROLLOUT_N:-1}"
@@ -324,20 +313,44 @@ if [[ "${HOPD_PAPER:-0}" == "1" ]]; then
     MIX_ARGS=(distillation.mix_teachers=True distillation.mix_temperature="${HOPD_MIX_TAU:-0.5}")
     RUN_TAG="${RUN_TAG}-paper"
     if [[ -z "${_MAX_RESPONSE_SET:-}" ]]; then
-        MAX_RESPONSE=256
+        # Paper used 128; 256 left almost no headroom for Adam after reverse KL.
+        MAX_RESPONSE=128
+    fi
+    if [[ -z "${_TRAIN_BSZ_SET:-}" ]]; then
+        # bs8 + reverse-KL vocab logits OOMs Adam on a single 40GB student GPU.
+        TRAIN_BSZ=4
     fi
     USE_TORCH_COMPILE="${USE_TORCH_COMPILE:-False}"
+    # Adam foreach allocates a large temporary workspace; the Sept/Nov OOMs
+    # died in `_foreach_sqrt` needing ~194 MiB with <150 MiB free.
+    OPTIM_OVERRIDE_ARGS=(
+        +actor_rollout_ref.actor.optim.override_optimizer_config.foreach=False
+    )
     echo "HOPD_PAPER=1: union Ω_t mix, reverse KL, supervised (no PPO, no task reward)"
     echo "HOPD_PAPER=1: text teacher uses parquet text_prompt ([IMAGE DESCRIPTION]); tau=${HOPD_MIX_TAU:-0.5} topk=$TOPK lr=$LR"
-    echo "HOPD_PAPER=1: MAX_RESPONSE=$MAX_RESPONSE use_torch_compile=$USE_TORCH_COMPILE"
+    echo "HOPD_PAPER=1: MAX_RESPONSE=$MAX_RESPONSE TRAIN_BSZ=$TRAIN_BSZ use_torch_compile=$USE_TORCH_COMPILE Adam.foreach=False"
     echo "HOPD_PAPER=1: val_sets=$VAL_SETS val=$VAL_FILES_ARG TEST_FREQ=$TEST_FREQ val_before_train=$VAL_BEFORE_TRAIN"
 fi
 USE_TORCH_COMPILE="${USE_TORCH_COMPILE:-True}"
+OPTIM_OVERRIDE_ARGS=("${OPTIM_OVERRIDE_ARGS[@]+"${OPTIM_OVERRIDE_ARGS[@]}"}")
+# After paper may have lowered TRAIN_BSZ: agent.num_workers must divide it.
+if [[ -z "${AGENT_WORKERS:-}" ]]; then
+    if (( TRAIN_BSZ % 8 == 0 )); then
+        AGENT_WORKERS=8
+    else
+        AGENT_WORKERS=$TRAIN_BSZ
+    fi
+fi
+if (( TRAIN_BSZ % AGENT_WORKERS != 0 )); then
+    echo "ERROR: TRAIN_BSZ=$TRAIN_BSZ must be divisible by AGENT_WORKERS=$AGENT_WORKERS" >&2
+    exit 1
+fi
 # Student vLLM is colocated with FSDP+Adam on GPU 0. Paper reverse KL
-# keeps full-vocab logits; 0.70 util OOM'd Adam on step 2 of the 20k run.
+# keeps full-vocab logits; 0.70/0.40 util still OOM'd Adam (jobs ilfpvpgk /
+# zqp28bju / 3550951). Leave more free for FSDP+Adam after vLLM sleep.
 if [[ -z "${STUDENT_GPU_UTIL:-}" ]]; then
     if [[ "${HOPD_PAPER:-0}" == "1" ]]; then
-        STUDENT_GPU_UTIL=0.40
+        STUDENT_GPU_UTIL=0.30
     else
         STUDENT_GPU_UTIL=0.70
     fi
@@ -377,6 +390,8 @@ if [[ -d "$_OVERLAY/verl" && -d "$HOPD_HOME/verl/verl" ]]; then
         "$HOPD_HOME/verl/verl/experimental/agent_loop/agent_loop.py"
     cp "$_OVERLAY/verl/single_controller/ray/base.py" \
         "$HOPD_HOME/verl/verl/single_controller/ray/base.py"
+    cp "$_OVERLAY/verl/workers/engine/fsdp/transformer_impl.py" \
+        "$HOPD_HOME/verl/verl/workers/engine/fsdp/transformer_impl.py"
 fi
 
 # Every python process that imports torch/vLLM from the $SCRATCH venv costs
@@ -507,6 +522,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.entropy_coeff=0 \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
+    ${OPTIM_OVERRIDE_ARGS[@]+"${OPTIM_OVERRIDE_ARGS[@]}"} \
     \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$STUDENT_GPUS \
@@ -515,6 +531,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.max_num_seqs=$MAX_NUM_SEQS \
     actor_rollout_ref.rollout.enforce_eager=True \
     actor_rollout_ref.rollout.free_cache_engine=True \
+    actor_rollout_ref.rollout.enable_sleep_mode=True \
     actor_rollout_ref.rollout.max_model_len=$MAX_NUM_TOKENS \
     actor_rollout_ref.rollout.n=$ROLLOUT_N \
     actor_rollout_ref.rollout.temperature=1.0 \
