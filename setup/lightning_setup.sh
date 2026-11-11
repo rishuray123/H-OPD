@@ -44,6 +44,8 @@ if [[ -d "$OVERLAY" ]]; then
     cp -v "$OVERLAY/teacher_loop/teacher_manager.py" "$HOPD_HOME/verl/verl/experimental/teacher_loop/teacher_manager.py"
     cp -v "$OVERLAY/agent_loop/agent_loop.py" "$HOPD_HOME/verl/verl/experimental/agent_loop/agent_loop.py"
     cp -v "$OVERLAY/../single_controller/ray/base.py" "$HOPD_HOME/verl/verl/single_controller/ray/base.py"
+    cp -v "$OVERLAY/../workers/engine/fsdp/transformer_impl.py" \
+        "$HOPD_HOME/verl/verl/workers/engine/fsdp/transformer_impl.py"
 fi
 python -c "from verl.experimental.teacher_loop.teacher_manager import tokenize_text_teacher_prompt; print('overlay OK')"
 
