@@ -73,36 +73,123 @@ def _gt(row) -> str:
     return ""
 
 
+def _as_bytes(b) -> bytes | None:
+    """Normalize parquet/pandas/pyarrow/numpy payloads to raw bytes."""
+    if b is None:
+        return None
+    # pandas NA
+    try:
+        import pandas as pd
+
+        if b is pd.NA or (isinstance(b, float) and pd.isna(b)):
+            return None
+    except Exception:
+        pass
+    if isinstance(b, memoryview):
+        b = b.tobytes()
+    if isinstance(b, (bytes, bytearray)) and len(b) > 0:
+        return bytes(b)
+    # numpy array of uint8
+    try:
+        import numpy as np
+
+        if isinstance(b, np.ndarray) and b.dtype == np.uint8 and b.size > 0:
+            return b.tobytes()
+        if isinstance(b, np.generic):
+            return None
+    except Exception:
+        pass
+    # list/tuple of ints ( occasional parquet decode )
+    if isinstance(b, (list, tuple)) and b and all(isinstance(x, int) for x in b[:8]):
+        try:
+            return bytes(b)
+        except Exception:
+            return None
+    # pyarrow scalar
+    if hasattr(b, "as_py"):
+        try:
+            return _as_bytes(b.as_py())
+        except Exception:
+            return None
+    if hasattr(b, "tobytes") and not isinstance(b, str):
+        try:
+            out = b.tobytes()
+            if isinstance(out, (bytes, bytearray)) and len(out) > 0:
+                return bytes(out)
+        except Exception:
+            pass
+    return None
+
+
 def _image_bytes(images) -> bytes | None:
     if images is None:
         return None
+    # numpy object array / pandas Series
+    if hasattr(images, "tolist") and not isinstance(images, (bytes, bytearray, memoryview)):
+        try:
+            images = images.tolist()
+        except Exception:
+            pass
     items = images if isinstance(images, (list, tuple)) else [images]
     for im in items:
         if im is None:
             continue
         if isinstance(im, dict):
-            b = im.get("bytes")
-            if b is None:
-                continue
-            if isinstance(b, memoryview):
-                b = b.tobytes()
-            if isinstance(b, (bytes, bytearray)) and len(b) > 0:
-                return bytes(b)
-        elif isinstance(im, (bytes, bytearray)) and len(im) > 0:
-            return bytes(im)
+            for k in ("bytes", "image", "path"):
+                if k not in im:
+                    continue
+                got = _as_bytes(im.get(k))
+                if got:
+                    return got
+            # sometimes the dict itself is the struct with only bytes-like values
+            for v in im.values():
+                got = _as_bytes(v)
+                if got and len(got) > 100:  # skip max_pixels ints etc.
+                    return got
+            continue
+        got = _as_bytes(im)
+        if got:
+            return got
     return None
 
 
 def _load_parquet_index(paths: list[Path]):
     import pandas as pd
+    import pyarrow.parquet as pq
 
     rows = []
     for path in paths:
-        df = pd.read_parquet(path)
+        # Arrow preserves binary better than df.to_dict() for nested structs.
+        table = pq.read_table(path)
+        df = table.to_pandas()
+        img_col = None
+        for c in ("images", "image"):
+            if c in df.columns:
+                img_col = c
+                break
+        # Debug first row once per file
+        if len(df) and img_col:
+            sample = df.iloc[0][img_col]
+            raw = _image_bytes(sample)
+            print(
+                f"[gallery] {path.name}: images col={img_col} "
+                f"type={type(sample).__name__} bytes={0 if raw is None else len(raw)}",
+                flush=True,
+            )
+            if raw is None:
+                print(f"[gallery]   sample repr head={repr(sample)[:300]}", flush=True)
         for i in range(len(df)):
             r = df.iloc[i].to_dict()
             q = _question_from_parquet_prompt(r.get("prompt"))
             g = _gt(r)
+            imgs = r.get(img_col) if img_col else None
+            # Prefer arrow cell if pandas emptied bytes
+            if _image_bytes(imgs) is None and img_col and img_col in table.column_names:
+                try:
+                    cell = table.column(img_col)[i].as_py()
+                    imgs = cell
+                except Exception:
+                    pass
             rows.append(
                 {
                     "source": path.name,
@@ -110,7 +197,7 @@ def _load_parquet_index(paths: list[Path]):
                     "question": q,
                     "gt": g,
                     "key": (g, q.lower()),
-                    "images": r.get("images"),
+                    "images": imgs,
                     "data_source": r.get("data_source"),
                 }
             )
@@ -173,6 +260,7 @@ def main() -> None:
 
         img_b64 = None
         meta = "unmatched parquet"
+        img_note = "(no image matched)"
         if hit is not None:
             matched += 1
             meta = f"{hit['source']}#{hit['row']} ds={hit.get('data_source')}"
@@ -182,10 +270,14 @@ def main() -> None:
                 mime = "image/jpeg"
                 if raw[:8] == b"\x89PNG\r\n\x1a\n":
                     mime = "image/png"
+                elif raw[:4] == b"RIFF":
+                    mime = "image/webp"
                 img_b64 = f"data:{mime};base64," + base64.b64encode(raw).decode("ascii")
                 if args.save_files:
-                    ext = "png" if "png" in mime else "jpg"
+                    ext = "png" if "png" in mime else ("webp" if "webp" in mime else "jpg")
                     (rows_dir / f"{idx:02d}.{ext}").write_bytes(raw)
+            else:
+                img_note = "(row matched, but image bytes empty/unreadable)"
 
         if args.save_files:
             (rows_dir / f"{idx:02d}.txt").write_text(
@@ -196,7 +288,7 @@ def main() -> None:
         img_html = (
             f'<img src="{img_b64}" alt="sample" style="max-width:100%;max-height:360px;"/>'
             if img_b64
-            else '<div class="missing">(no image matched)</div>'
+            else f'<div class="missing">{html.escape(img_note)}</div>'
         )
         acc = rec.get("acc")
         cards.append(
