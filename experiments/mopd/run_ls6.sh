@@ -531,7 +531,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.max_num_seqs=$MAX_NUM_SEQS \
     actor_rollout_ref.rollout.enforce_eager=True \
     actor_rollout_ref.rollout.free_cache_engine=True \
-    actor_rollout_ref.rollout.enable_sleep_mode=True \
+    +actor_rollout_ref.rollout.enable_sleep_mode=True \
     actor_rollout_ref.rollout.max_model_len=$MAX_NUM_TOKENS \
     actor_rollout_ref.rollout.n=$ROLLOUT_N \
     actor_rollout_ref.rollout.temperature=1.0 \
