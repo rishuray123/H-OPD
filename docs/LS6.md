@@ -134,6 +134,21 @@ and uses `<repo>/scratch` for venv, data, HF cache and checkpoints.
   **Final held-out (step 80, n=704):** `val_acc` **0.511** — MathVision 0.688, MathVerse 0.500, MathVista 0.255. Flat vs earlier mid-run vals (~0.51–0.53). Not Table‑1.
 
   **Pipeline:** `tilde_x=1`, `omega_k≈8–9`, `teacher_mass≈1`, `alpha_vl≈0.69–0.87`. Loss 6.88→4.57 (noisy); step 71 short answers; step 72 loss/grad spike then recovered. Rollout `acc` at n=2 is noise.
+
+- 2026-11-19: **3593297** `hopd-p20k` died at step 0 with `UnboundLocalError: torch` in `ray_trainer.fit` — the post-val `empty_cache` launcher patch did `import torch` inside `fit()`, which shadows the module import and breaks earlier `torch.sum(...)`. Fix: repair/patch without local `import torch` in `run_ls6.sh`. Resubmit p20k + check whether **3593342** `hopd-r256` hit the same (same launcher).
+- 2026-11-19 night: **two jobs queued** on `gpu-a100` (check tomorrow morning). Do not claim Table‑1.
+  | JobID | Name | Config | Why |
+  |-------|------|--------|-----|
+  | **3593297** | `hopd-p20k` | `MOPD_MAX_ROWS=20000` `STEPS=200` `TEST_FREQ=200` `SAVE_FREQ=50` `TRAIN_BSZ=2` `STUDENT_GPU_UTIL=0.25` `MAX_RESPONSE=128` `VAL_BEFORE_TRAIN=False` `-t 24:00:00` | Scale-up vs 2k/80 smoke |
+  | **3593342** | `hopd-r256` | `MOPD_MAX_ROWS=2048` `STEPS=40` `TEST_FREQ=40` `SAVE_FREQ=40` `TRAIN_BSZ=2` `STUDENT_GPU_UTIL=0.25` **`MAX_RESPONSE=256`** `VAL_BEFORE_TRAIN=False` `-t 12:00:00` | Same 2k data; longer answers for val grading / less mid-sentence cut |
+
+  Morning check:
+  ```bash
+  squeue -u $USER
+  sacct -j 3593297,3593342 --format=JobID,JobName,State,Elapsed,ExitCode,End,NodeList -P
+  ls -la $SCRATCH/hopd/H-OPD/logs/hopd-p20k_3593297.out $SCRATCH/hopd/H-OPD/logs/hopd-r256_3593342.out
+  ls -la $SCRATCH/hopd/H-OPD/logs/mopd_3593297 $SCRATCH/hopd/H-OPD/logs/mopd_3593342
+  ```
 - 2026-11-18: **3592493 FAILED** after step 20 + full val (n=704). Metrics through 20 were healthy: `tilde_x=1`, `omega_k≈8–9`, `alpha_vl≈0.70–0.79`, `teacher_mass≈1`, distill_loss 6.09→2.63, rollout acc 0→0.75, `val_acc` 0.513→0.526 (MathVision 0.688→0.694, MathVerse 0.52→0.515, MathVista 0.24→0.28). Then step-21 `update_actor` died in `_single_tensor_adam` (`foreach=False` path): needed 1.55 GiB, 1.50 GiB free; actor ~35.2/39.5 GiB + residual vLLM ~2.7 GiB. Checkpoint should be `.../hopd-mopd-smoke2048-paper-3592493/global_step_20` (SAVE_FREQ=20 runs after that step's Adam, before val). Mitigations: paper `STUDENT_GPU_UTIL` default **0.25**; stronger pre-Adam `empty_cache`; `RESUME_MODE` / `RESUME_FROM_PATH` / `SAVE_DIR` env in `run_ls6.sh`. Resume from login: `HOPD_PAPER=1 MOPD_MAX_ROWS=2048 STEPS=80 TEST_FREQ=20 SAVE_FREQ=20 VAL_SETS=all VAL_MAX_ROWS=0 VAL_BEFORE_TRAIN=False STUDENT_GPU_UTIL=0.25 SAVE_DIR=$SCRATCH/hopd/checkpoints/hopd-mopd-smoke2048-paper-3592493 RESUME_MODE=auto sbatch -p gpu-a100 --job-name=hopd-p2k experiments/mopd/run_ls6.sh`. If `global_step_20` is missing, same env without SAVE_DIR/RESUME (fresh start). Do not claim Table‑1.
 
 - 2026-11-04 00:42 IST: `-dev` queue snapshot: 4 nodes all `R`, ~24 `PD (Priority)` incl. ~8 other `idv*`; our `idev` **3549574** (`-m 90`, replaced 3549527) ranks near the bottom. Late-evening `-dev` waits are multi-hour; priority accrues with queue time, so cancel/resubmit only to change `-m`. Backup sbatch 3549571 on `gpu-a100` left queued.

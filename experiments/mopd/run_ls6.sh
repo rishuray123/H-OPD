@@ -412,27 +412,17 @@ if [[ -d "$_OVERLAY/verl" && -d "$HOPD_HOME/verl/verl" ]]; then
 fi
 # Post-val Adam OOM (3592493/3592795): free CUDA after _validate so step N+1
 # Adam has headroom. Nested verl is gitignored; patch in place each launch.
+# IMPORTANT: do NOT `import torch` inside fit() — that shadows the module-level
+# import and causes UnboundLocalError on earlier torch.* uses (job 3593297).
 _RT="$HOPD_HOME/verl/verl/trainer/ppo/ray_trainer.py"
-if [[ -f "$_RT" ]] && ! grep -q "Full val wakes colocated student vLLM" "$_RT"; then
-    hopd_ts "=== patching ray_trainer post-val empty_cache"
+if [[ -f "$_RT" ]]; then
+    hopd_ts "=== ensuring ray_trainer post-val empty_cache (no local import torch)"
     python3 - "$_RT" <<'PY'
 import pathlib, sys
 p = pathlib.Path(sys.argv[1])
 s = p.read_text()
-needle = "                    metrics.update(val_metrics)\n"
-# Only the validate-block occurrence that follows _validate().
-anchor = "val_metrics: dict = self._validate()"
-idx = s.find(anchor)
-if idx < 0:
-    print("WARN: _validate anchor missing; skip post-val empty_cache patch", flush=True)
-    raise SystemExit(0)
-j = s.find(needle, idx)
-if j < 0:
-    print("WARN: metrics.update(val_metrics) missing after validate; skip", flush=True)
-    raise SystemExit(0)
-insert = """                    # Full val wakes colocated student vLLM and fragments GPU 0;
-                    # next Adam then OOMs (~1.55 GiB, jobs 3592493 / 3592795).
-                    import gc
+# Repair bad patch from 3593297: local import torch inside fit().
+bad = """                    import gc
 
                     gc.collect()
                     try:
@@ -444,8 +434,41 @@ insert = """                    # Full val wakes colocated student vLLM and frag
                     except Exception:
                         pass
 """
-p.write_text(s[:j] + insert + s[j:])
-print("patched", p, flush=True)
+good = """                    import gc
+
+                    gc.collect()
+                    try:
+                        # torch already imported at module scope — do not re-import here.
+                        if torch.cuda.is_available():
+                            torch.cuda.synchronize()
+                            torch.cuda.empty_cache()
+                    except Exception:
+                        pass
+"""
+if bad in s:
+    s = s.replace(bad, good)
+    p.write_text(s)
+    print("repaired local import torch in", p, flush=True)
+elif "Full val wakes colocated student vLLM" not in s:
+    needle = "                    metrics.update(val_metrics)\n"
+    anchor = "val_metrics: dict = self._validate()"
+    idx = s.find(anchor)
+    if idx < 0:
+        print("WARN: _validate anchor missing; skip post-val empty_cache patch", flush=True)
+        raise SystemExit(0)
+    j = s.find(needle, idx)
+    if j < 0:
+        print("WARN: metrics.update(val_metrics) missing after validate; skip", flush=True)
+        raise SystemExit(0)
+    insert = (
+        "                    # Full val wakes colocated student vLLM and fragments GPU 0;\n"
+        "                    # next Adam then OOMs (~1.55 GiB, jobs 3592493 / 3592795).\n"
+        + good
+    )
+    p.write_text(s[:j] + insert + s[j:])
+    print("patched", p, flush=True)
+else:
+    print("post-val empty_cache already OK", flush=True)
 PY
 fi
 
