@@ -267,6 +267,36 @@ def mix_teacher_token_logprobs(
     return mixed_logp, stats
 
 
+def _pad_teacher_topk_width(
+    teacher_ids: torch.Tensor,
+    teacher_logprobs: torch.Tensor,
+    k_width: int,
+    pad_token_id: int = -1,
+    pad_logprob: float = -10.0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Pad/truncate the top-k axis so every sample shares the same last dim.
+
+    Mix union tables are width ~2*topk; one-teacher fallbacks are width 1.
+    DataProto.concat across agent workers requires a uniform K (job 3592339:
+    Expected size 16 but got size 1).
+    """
+    if k_width <= 0:
+        return teacher_ids, teacher_logprobs
+    if teacher_ids.ndim == 1:
+        teacher_ids = teacher_ids.unsqueeze(-1)
+        teacher_logprobs = teacher_logprobs.unsqueeze(-1)
+    cur = int(teacher_ids.shape[-1])
+    if cur == k_width:
+        return teacher_ids, teacher_logprobs
+    if cur > k_width:
+        return teacher_ids[..., :k_width], teacher_logprobs[..., :k_width]
+    pad = k_width - cur
+    return (
+        F.pad(teacher_ids, (0, pad), value=pad_token_id),
+        F.pad(teacher_logprobs, (0, pad), value=float(pad_logprob)),
+    )
+
+
 def _pad_teacher_outputs(
     teacher_ids: torch.Tensor,
     teacher_logprobs: torch.Tensor,
@@ -275,8 +305,13 @@ def _pad_teacher_outputs(
     prompt_length: int,
     response_length: int,
     pad_token_id: int,
+    k_width: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # TODO(wuxibin): remove padding and use tensordict.
+    if k_width is not None:
+        teacher_ids, teacher_logprobs = _pad_teacher_topk_width(
+            teacher_ids, teacher_logprobs, k_width=k_width, pad_token_id=pad_token_id
+        )
     left_pad_size = prompt_width - prompt_length
     right_pad_size = response_width - response_length
     padding = (0, 0, left_pad_size, right_pad_size)
@@ -512,6 +547,13 @@ class AsyncTeacherLLMServerManager:
                     teacher_ids = y.to(torch.int32).unsqueeze(-1)
                     teacher_logprobs = mixed.unsqueeze(-1)
                     self.last_mix_stats = stats
+            # Uniform K across samples (union=2*topk, fallback/k1=1).
+            topk = int(getattr(self.distillation_loss_config, "topk", 0) or 0)
+            k_width = max(2 * topk, int(teacher_ids.shape[-1])) if topk > 0 else int(teacher_ids.shape[-1])
+            floor = float(self.distillation_loss_config.log_prob_min_clamp or -10.0)
+            teacher_ids, teacher_logprobs = _pad_teacher_topk_width(
+                teacher_ids, teacher_logprobs, k_width=k_width, pad_logprob=floor
+            )
             return teacher_ids, teacher_logprobs
 
         teacher_key = self._resolve_teacher_key(routing_key)

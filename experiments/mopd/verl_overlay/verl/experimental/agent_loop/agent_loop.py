@@ -762,6 +762,19 @@ class AgentLoopWorker:
             # TODO(wuxibin): remove padding and use tensordict.
             from verl.experimental.teacher_loop.teacher_manager import _pad_teacher_outputs
 
+            k_width = None
+            if getattr(self, "distillation_enabled", False) and self.teacher_server_manager is not None:
+                cfg = getattr(self.teacher_server_manager, "distillation_loss_config", None)
+                topk = int(getattr(cfg, "topk", 0) or 0) if cfg is not None else 0
+                mix = bool(
+                    getattr(
+                        getattr(self.teacher_server_manager, "distillation_config", None),
+                        "mix_teachers",
+                        False,
+                    )
+                )
+                if topk > 0:
+                    k_width = 2 * topk if mix else topk
             teacher_ids, teacher_logprobs = _pad_teacher_outputs(
                 teacher_ids,
                 teacher_logprobs,
@@ -770,6 +783,7 @@ class AgentLoopWorker:
                 prompt_length=len(output.prompt_ids),
                 response_length=len(output.response_ids),
                 pad_token_id=self.tokenizer.pad_token_id,
+                k_width=k_width,
             )
 
         return _InternalAgentLoopOutput(
