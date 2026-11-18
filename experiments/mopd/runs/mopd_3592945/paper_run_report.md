@@ -174,12 +174,25 @@ python3 experiments/mopd/watch.py --run logs/mopd_3592945 \
 
 ---
 
-## 7. Next if scaling toward paper claims
+## 7. Remaining gaps vs paper (besides raw scale)
+
+| Gap | Notes |
+|-----|--------|
+| Eval harness | Paper: VLMEvalKit / broader benches. We: 3 HF eval slices, custom `acc`. |
+| Mid-run val + Adam | Paper can val often; we need end-only val or post-val `empty_cache` on 40GB. |
+| Image in val dumps | veRL `val/*.jsonl` is text-only (`skip_special_tokens`). Rejoin pixels via `export_val_gallery.py`. |
+| Stability | Step 71 empty / step 72 grad spike — inspect before trusting longer curves. |
+| Baselines | No single-teacher / no-mix control at same scale yet. |
+| Student mass | Stays low — weak top-k match vs paper-scale runs. |
+
+Scale (55k, bs128, ~12k ctx, 8×B200) is still the main accuracy blocker.
+
+## 8. Next if scaling toward paper claims
 
 Only change **scale knobs** that matter for accuracy; keep the recipe (models, \(\tau=0.5\), `reverse_kl_topk`, lr, resp 128, \(\tilde{x}\)).
 
 1. Sync launcher/overlay (resume + post-val `empty_cache` + `VAL_SETS=all`) before mid-run val.
-2. **Next paper-ish job (safe on 3×A100):** 8k–20k rows, 200 steps, `TRAIN_BSZ=2`, end-only or sparse val — see commands in chat / below.
+2. **Next paper-ish job (safe on 3×A100):** 8k–20k rows, 200 steps, `TRAIN_BSZ=2`, end-only or sparse val.
 3. Do **not** yet: bs128, 12k ctx, flash_attn, task reward, \(\tau\) sweeps, model swaps.
-4. Investigate step-72 grad spike / step-71 empty responses on local rollout dumps.
+4. Inspect step-71/72 rollouts; build val image gallery with `export_val_gallery.py`.
 5. Still not Table‑1 until data/batch/HW/eval match.
