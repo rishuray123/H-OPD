@@ -150,12 +150,17 @@ elif [[ "${HOPD_PAPER:-0}" == "1" || "${MOPD_FULL:-0}" == "1" ]]; then
     if [[ "${VAL_MAX_ROWS:-0}" -gt 0 ]]; then
         _val_tag="_${VAL_MAX_ROWS}"
     fi
+    # Expand all -> the three paper held-out sets (3592785 died on bare "all").
+    if [[ "${VAL_SETS}" == "all" ]]; then
+        VAL_SETS="mathvista,mathverse,mathvision"
+    fi
     for _vs in ${VAL_SETS//,/ }; do
         case "$_vs" in
             mathvista)  _valname='mathvista_200_test.parquet' ;;
             mathverse)  _valname='mathverse_200_test.parquet' ;;
             mathvision) _valname='mathvision_test.parquet' ;;
-            *) echo "ERROR: VAL_SETS entry '$_vs' unknown (mathvista|mathverse|mathvision)" >&2; exit 1 ;;
+            all)        continue ;; # already expanded above; ignore if nested
+            *) echo "ERROR: VAL_SETS entry '$_vs' unknown (mathvista|mathverse|mathvision|all)" >&2; exit 1 ;;
         esac
         _valsrc="$(find "$HOPD_DATA_ROOT" -name "$_valname" | head -1 || true)"
         if [[ -z "$_valsrc" || ! -f "$_valsrc" ]]; then
@@ -317,8 +322,11 @@ if [[ "${HOPD_PAPER:-0}" == "1" ]]; then
         MAX_RESPONSE=128
     fi
     if [[ -z "${_TRAIN_BSZ_SET:-}" ]]; then
-        # bs8 + reverse-KL vocab logits OOMs Adam on a single 40GB student GPU.
-        TRAIN_BSZ=4
+        # bs8/bs4 + reverse-KL: Adam OOMs after the first full val (3592493 /
+        # 3592795) even at STUDENT_GPU_UTIL=0.25 — actor still ~34 GiB. bs2
+        # lowers the train peak; also prefer TEST_FREQ=STEPS (val only at end)
+        # or the post-val empty_cache patch so mid-run val does not kill step N+1.
+        TRAIN_BSZ=2
     fi
     USE_TORCH_COMPILE="${USE_TORCH_COMPILE:-False}"
     # Adam foreach allocates a large temporary workspace; the Sept/Nov OOMs
@@ -346,11 +354,11 @@ if (( TRAIN_BSZ % AGENT_WORKERS != 0 )); then
     exit 1
 fi
 # Student vLLM is colocated with FSDP+Adam on GPU 0. Paper reverse KL
-# keeps full-vocab logits; 0.70/0.40 util still OOM'd Adam (jobs ilfpvpgk /
-# zqp28bju / 3550951). Leave more free for FSDP+Adam after vLLM sleep.
+# keeps full-vocab logits; 0.70/0.40/0.30 util still OOM'd Adam after long
+# val (jobs ilfpvpgk / zqp28bju / 3550951 / 3592493). Leave more free.
 if [[ -z "${STUDENT_GPU_UTIL:-}" ]]; then
     if [[ "${HOPD_PAPER:-0}" == "1" ]]; then
-        STUDENT_GPU_UTIL=0.30
+        STUDENT_GPU_UTIL=0.25
     else
         STUDENT_GPU_UTIL=0.70
     fi
@@ -360,6 +368,15 @@ MAX_NUM_SEQS="${MAX_NUM_SEQS:-$TRAIN_BSZ}"
 # Do not set expandable_segments: vLLM CuMemAllocator (sleep mode) asserts
 # against it and the engine never starts.
 SAVE_DIR="${SAVE_DIR:-$HOPD_CKPT_ROOT/hopd-mopd-${RUN_TAG}-${SLURM_JOB_ID:-local}}"
+# Resume: RESUME_MODE=auto|disable|resume_path. For auto, point SAVE_DIR at the
+# prior run's checkpoint root. For resume_path, set RESUME_FROM_PATH=.../global_step_N.
+RESUME_MODE="${RESUME_MODE:-disable}"
+RESUME_FROM_PATH="${RESUME_FROM_PATH:-}"
+RESUME_ARGS=(trainer.resume_mode="$RESUME_MODE")
+if [[ -n "$RESUME_FROM_PATH" ]]; then
+    RESUME_ARGS+=(trainer.resume_from_path="$RESUME_FROM_PATH")
+fi
+echo "resume: mode=$RESUME_MODE path=${RESUME_FROM_PATH:-<none>} save_dir=$SAVE_DIR"
 RUN_LOG_DIR="$HOPD_LOG_DIR/mopd_${SLURM_JOB_ID:-$(date +%Y%m%d_%H%M%S)}"
 mkdir -p "$RUN_LOG_DIR" "$SAVE_DIR" "$RUN_LOG_DIR/rollouts" "$RUN_LOG_DIR/val"
 
@@ -392,6 +409,44 @@ if [[ -d "$_OVERLAY/verl" && -d "$HOPD_HOME/verl/verl" ]]; then
         "$HOPD_HOME/verl/verl/single_controller/ray/base.py"
     cp "$_OVERLAY/verl/workers/engine/fsdp/transformer_impl.py" \
         "$HOPD_HOME/verl/verl/workers/engine/fsdp/transformer_impl.py"
+fi
+# Post-val Adam OOM (3592493/3592795): free CUDA after _validate so step N+1
+# Adam has headroom. Nested verl is gitignored; patch in place each launch.
+_RT="$HOPD_HOME/verl/verl/trainer/ppo/ray_trainer.py"
+if [[ -f "$_RT" ]] && ! grep -q "Full val wakes colocated student vLLM" "$_RT"; then
+    hopd_ts "=== patching ray_trainer post-val empty_cache"
+    python3 - "$_RT" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1])
+s = p.read_text()
+needle = "                    metrics.update(val_metrics)\n"
+# Only the validate-block occurrence that follows _validate().
+anchor = "val_metrics: dict = self._validate()"
+idx = s.find(anchor)
+if idx < 0:
+    print("WARN: _validate anchor missing; skip post-val empty_cache patch", flush=True)
+    raise SystemExit(0)
+j = s.find(needle, idx)
+if j < 0:
+    print("WARN: metrics.update(val_metrics) missing after validate; skip", flush=True)
+    raise SystemExit(0)
+insert = """                    # Full val wakes colocated student vLLM and fragments GPU 0;
+                    # next Adam then OOMs (~1.55 GiB, jobs 3592493 / 3592795).
+                    import gc
+
+                    gc.collect()
+                    try:
+                        import torch
+
+                        if torch.cuda.is_available():
+                            torch.cuda.synchronize()
+                            torch.cuda.empty_cache()
+                    except Exception:
+                        pass
+"""
+p.write_text(s[:j] + insert + s[j:])
+print("patched", p, flush=True)
+PY
 fi
 
 # Every python process that imports torch/vLLM from the $SCRATCH venv costs
@@ -573,7 +628,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.experiment_name=hopd-mopd-${RUN_TAG}-${SLURM_JOB_ID:-local} \
     trainer.nnodes=1 \
     trainer.n_gpus_per_node=$STUDENT_GPUS \
-    trainer.resume_mode=disable \
+    ${RESUME_ARGS[@]+"${RESUME_ARGS[@]}"} \
     trainer.default_local_dir=$SAVE_DIR \
     trainer.val_before_train=$VAL_BEFORE_TRAIN \
     trainer.total_epochs=$EPOCHS \

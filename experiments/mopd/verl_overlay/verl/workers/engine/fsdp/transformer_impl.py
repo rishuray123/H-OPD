@@ -655,14 +655,19 @@ class FSDPEngine(BaseEngine):
             print(f"WARN: grad_norm is not finite: {grad_norm}")
             self.optimizer.zero_grad()
         else:
-            # Reverse-KL logits can leave the GPU full; Adam foreach then
-            # dies asking for ~200MB (jobs zqp28bju / 3550951). Drop refs and
-            # free cached blocks before the step. Prefer AdamW(foreach=False)
-            # via override_optimizer_config as well.
+            # Reverse-KL logits can leave the GPU full; Adam then dies asking
+            # for ~0.2–1.5 GiB with <that free (zqp28bju / 3550951 / 3592493).
+            # Drop refs and free cached blocks before the step. Prefer
+            # AdamW(foreach=False) via override_optimizer_config as well.
             import gc
 
             gc.collect()
-            torch.cuda.empty_cache()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+                # Second pass helps after large val / sleep-wake (3592493).
+                gc.collect()
+                torch.cuda.empty_cache()
             self.optimizer.step()
 
         if self._qat_enabled:
