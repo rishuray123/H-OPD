@@ -221,6 +221,12 @@ if [[ "${MOPD_FULL:-0}" == "1" ]]; then
     TEST_FREQ="${TEST_FREQ:-${TEST_FREQ_FULL:-50}}"
     EPOCHS="${EPOCHS:-1}"
     RUN_TAG="full"
+    # Honor STEPS when set — otherwise a full epoch continues past TEST_FREQ
+    # val and hits post-val Adam OOM (3593882: STEPS=500 ignored under MOPD_FULL=1).
+    if [[ -n "${STEPS:-}" ]]; then
+        STEP_ARGS=(+trainer.total_training_steps="$STEPS")
+        echo "MOPD_FULL=1 with STEPS=$STEPS (capped; not a full epoch)"
+    fi
 elif [[ "${MAX_ROWS:-0}" -ge 1000 ]]; then
     if [[ "$SAVE_FREQ" == "-1" ]]; then
         SAVE_FREQ=50
